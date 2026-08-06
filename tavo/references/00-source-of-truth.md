@@ -65,8 +65,8 @@ For non-trivial capability answers, state the evidence tier briefly:
 python3 scripts/fetch_official_docs.py --output /tmp/tavo-official-docs-current
 python3 scripts/normalize_official_docs.py
 python3 scripts/dump_mcp_surface.py --strict --output /tmp/tavo-mcp-surface-current
-python3 scripts/audit_skill_skeleton.py skills/tavo
-python3 scripts/audit_tavo_skill.py skills/tavo
+python3 tavo/scripts/audit_skill_skeleton.py tavo
+python3 tavo/scripts/audit_tavo_skill.py tavo
 ```
 
 The current complete official-doc text snapshot is stored under `assets/official-docs/text-20260716/`, with normalized metadata in `assets/official-docs/official_manifest.json`. The 2026-07-10 snapshot is intentionally retained as the 0.91-era comparison baseline. Refresh the live site and MCP surface before treating this draft as current after future product updates.

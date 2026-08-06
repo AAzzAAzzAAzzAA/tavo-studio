@@ -1,9 +1,9 @@
 __pycache__/
 *.py[cod]
-skills/tavo/artifacts/
-skills/tavo-1-0-beta/artifacts/
-skills/archive/**/artifacts/
-skills/archive/**/node_modules/
+tavo/artifacts/
+tavo-1-0-beta/artifacts/
+archive/**/artifacts/
+archive/**/node_modules/
 .DS_Store
 .env
 .env.*

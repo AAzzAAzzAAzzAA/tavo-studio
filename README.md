@@ -5,9 +5,9 @@
 ## 仓库结构
 
 ```text
-skills/archive/          旧 Tavo Studio 与 Dev Kit 的只读历史归档
-skills/tavo/             当前稳定版 Skill
-skills/tavo-1-0-beta/    Tavo 1.0 内测版完整 Skill
+archive/          旧 Tavo Studio 与 Dev Kit 的只读历史归档
+tavo/             当前稳定版 Skill
+tavo-1-0-beta/    Tavo 1.0 内测版完整 Skill
 ```
 
 ## 包含内容
@@ -23,7 +23,7 @@ skills/tavo-1-0-beta/    Tavo 1.0 内测版完整 Skill
 
 ```bash
 mkdir -p ~/.codex/skills
-cp -R skills/tavo ~/.codex/skills/tavo
+cp -R tavo ~/.codex/skills/tavo
 ```
 
 之后在 Codex 中使用 `$tavo`，或直接提出 Tavo 能力、创作、调试与验证需求。
@@ -32,7 +32,7 @@ cp -R skills/tavo ~/.codex/skills/tavo
 
 ```bash
 mkdir -p ~/.codex/skills
-cp -R skills/tavo-1-0-beta ~/.codex/skills/tavo-1-0-beta
+cp -R tavo-1-0-beta ~/.codex/skills/tavo-1-0-beta
 ```
 
 Beta 必须显式使用 `$tavo-1-0-beta`。它不会隐式触发，因此可以与稳定版并存。该版本包含 Tavo 1.0 Agent Loop、MCP 1.0、`memory.append` 和插件中心的增量实证；尚未重测的能力继续保留旧版本证据标签。
@@ -46,11 +46,11 @@ Skill 将“声明面”和“运行可靠性”分开判断：
 3. Android 真机实验用于确认实际效果、渲染、持久化和回归。
 4. 历史材料只作为待验证素材，不覆盖当前证据。
 
-稳定版详见 [`skills/tavo/SKILL.md`](skills/tavo/SKILL.md)，内测版详见 [`skills/tavo-1-0-beta/SKILL.md`](skills/tavo-1-0-beta/SKILL.md)。
+稳定版详见 [`tavo/SKILL.md`](tavo/SKILL.md)，内测版详见 [`tavo-1-0-beta/SKILL.md`](tavo-1-0-beta/SKILL.md)。
 
 ## 历史版本
 
-旧 `tavo-studio` Skill 和 Dev Kit 位于 [`skills/archive/legacy-2026-07-11/`](skills/archive/legacy-2026-07-11/)，原始快照也保留在 Git 标签：
+旧 `tavo-studio` Skill 和 Dev Kit 位于 [`archive/legacy-2026-07-11/`](archive/legacy-2026-07-11/)，原始快照也保留在 Git 标签：
 
 ```text
 legacy-tavo-studio-kit-2026-07-11
