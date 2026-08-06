@@ -451,8 +451,11 @@ def main() -> int:
     openai_yaml = root / "agents/openai.yaml"
     if openai_yaml.exists():
         text = read(openai_yaml)
-        if "$tavo" not in text:
-            errors.append("agents/openai.yaml default_prompt must include $tavo")
+        expected_invocation = f"${root.name}"
+        if expected_invocation not in text:
+            errors.append(
+                "agents/openai.yaml default_prompt must include " + expected_invocation
+            )
         short_match = re.search(r"short_description:\s*['\"]?([^'\"]+)['\"]?", text)
         if short_match and len(short_match.group(1)) > 80:
             errors.append("agents/openai.yaml short_description is too long")

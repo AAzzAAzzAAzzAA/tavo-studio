@@ -9,8 +9,8 @@ Prompt Lab 是本 Skill 内置的纯文本测试入口。它把 Tavo native 预�
 唯一公开入口：
 
 ```bash
-python3 ~/.codex/skills/tavo-1-0-beta/scripts/tavo_prompt_lab.py compile --case /absolute/path/to/case.json
-python3 ~/.codex/skills/tavo-1-0-beta/scripts/tavo_prompt_lab.py run --case /absolute/path/to/case.json
+python3 ~/.codex/skills/tavo-1-0-beta-skill/scripts/tavo_prompt_lab.py compile --case /absolute/path/to/case.json
+python3 ~/.codex/skills/tavo-1-0-beta-skill/scripts/tavo_prompt_lab.py run --case /absolute/path/to/case.json
 ```
 
 可复制的完整样例位于 `assets/templates/prompt-lab-case.json`。Agent 应为当前产物生成一个 case JSON，先执行 `compile` 检查 `warnings`、`worldbookDecisions` 和 `request.messages`，得到用户同意或已明确授权真实调用后再执行 `run`。
@@ -120,7 +120,7 @@ v2 展开角色/Persona/消息常用宏、日期时间宏、格式化宏、注�
 
 ```bash
 # Set TAVO_PROMPT_LAB_API_KEY in the current shell or secret manager first.
-python3 ~/.codex/skills/tavo-1-0-beta/scripts/tavo_prompt_lab.py run \
+python3 ~/.codex/skills/tavo-1-0-beta-skill/scripts/tavo_prompt_lab.py run \
   --case /absolute/path/to/case.json \
   --base-url https://provider.example/v1 \
   --model provider-model-id \
@@ -170,10 +170,10 @@ Prompt Lab 的 `compatibility.target` 明确是 `evidence-bounded Tavo-shaped v2
 修改 Prompt Lab 后至少执行：
 
 ```bash
-python3 ~/.codex/skills/tavo-1-0-beta/scripts/test_tavo_prompt_lab.py
-python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py ~/.codex/skills/tavo-1-0-beta
-python3 ~/.codex/skills/tavo-1-0-beta/scripts/audit_skill_skeleton.py ~/.codex/skills/tavo-1-0-beta
-python3 ~/.codex/skills/tavo-1-0-beta/scripts/audit_tavo_skill.py ~/.codex/skills/tavo-1-0-beta
+python3 ~/.codex/skills/tavo-1-0-beta-skill/scripts/test_tavo_prompt_lab.py
+python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py ~/.codex/skills/tavo-1-0-beta-skill
+python3 ~/.codex/skills/tavo-1-0-beta-skill/scripts/audit_skill_skeleton.py ~/.codex/skills/tavo-1-0-beta-skill
+python3 ~/.codex/skills/tavo-1-0-beta-skill/scripts/audit_tavo_skill.py ~/.codex/skills/tavo-1-0-beta-skill
 ```
 
 Prompt Lab 单元测试只启动 loopback virtual provider；它没有上游转发路径，不能把 fixture response 当作真实模型语义。

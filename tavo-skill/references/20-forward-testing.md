@@ -1,6 +1,6 @@
 # Forward Testing
 
-Forward-test `$tavo` with subagents whenever references, scripts, templates, or validation behavior change materially.
+Forward-test `$tavo-skill` with subagents whenever references, scripts, templates, or validation behavior change materially.
 
 ## Rules
 
@@ -14,15 +14,15 @@ Forward-test `$tavo` with subagents whenever references, scripts, templates, or 
 
 | Family | Example prompt |
 | --- | --- |
-| Capability boundary | `Use $tavo to answer: Tavo 能不能在聊天气泡里做一个悬浮按钮，点击后把文字塞进输入框？` |
-| Character creation | `Use $tavo to design an importable role card and explain how to validate it.` |
-| Worldbook/regex/preset | `Use $tavo to create a small worldbook plus regex fixture and validation plan.` |
-| Advanced Rendering | `Use $tavo to write a minimal Advanced Rendering marker and explain proof requirements.` |
-| Plugin | `Use $tavo to outline a minimal TPG plugin package and validation steps.` |
-| MCP workflow | `Use $tavo to explain how to import a card, create a chat, switch to it, and prove it on phone.` |
-| Real model request | `Use $tavo to design a controlled 50-call real-phone model request batch and explain retained evidence requirements.` |
-| EJS/macro runtime | `Use $tavo to design live tests for EJS conditionals, macro variables, and missing-variable behavior.` |
-| Old claim audit | `Use $tavo to decide whether an old TavoJS snippet using window.tav should be reused.` |
+| Capability boundary | `Use $tavo-skill to answer: Tavo 能不能在聊天气泡里做一个悬浮按钮，点击后把文字塞进输入框？` |
+| Character creation | `Use $tavo-skill to design an importable role card and explain how to validate it.` |
+| Worldbook/regex/preset | `Use $tavo-skill to create a small worldbook plus regex fixture and validation plan.` |
+| Advanced Rendering | `Use $tavo-skill to write a minimal Advanced Rendering marker and explain proof requirements.` |
+| Plugin | `Use $tavo-skill to outline a minimal TPG plugin package and validation steps.` |
+| MCP workflow | `Use $tavo-skill to explain how to import a card, create a chat, switch to it, and prove it on phone.` |
+| Real model request | `Use $tavo-skill to design a controlled 50-call real-phone model request batch and explain retained evidence requirements.` |
+| EJS/macro runtime | `Use $tavo-skill to design live tests for EJS conditionals, macro variables, and missing-variable behavior.` |
+| Old claim audit | `Use $tavo-skill to decide whether an old TavoJS snippet using window.tav should be reused.` |
 
 ## Scoring
 
