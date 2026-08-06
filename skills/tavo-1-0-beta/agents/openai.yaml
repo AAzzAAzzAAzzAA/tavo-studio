@@ -1,0 +1,6 @@
+interface:
+  display_name: "Tavo 1.0 Beta"
+  short_description: "Test Tavo 1.0 Agent Loop and MCP workflows"
+  default_prompt: "Use $tavo-1-0-beta to answer from versioned Tavo 1.0 evidence or create and validate a beta-compatible Tavo artifact."
+policy:
+  allow_implicit_invocation: false

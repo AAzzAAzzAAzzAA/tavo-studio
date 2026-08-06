@@ -1,0 +1,13 @@
+{
+  "plugin.name": "Codex 最小验证插件",
+  "plugin.description": "用于 Tavo 验证的最小一次性插件包。",
+  "actions.insertMarker": "插入标记",
+  "settings.enabled": "启用",
+  "settings.mode.label": "模式",
+  "settings.mode.brief": "简短",
+  "settings.template.label": "模板",
+  "settings.template.default": "记住：",
+  "runtime.marker": "Codex 插件标记",
+  "runtime.panel.title": "Codex 插件标记面板",
+  "runtime.panel.status": "就绪"
+}

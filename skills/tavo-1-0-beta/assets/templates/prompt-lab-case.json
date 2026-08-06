@@ -1,0 +1,194 @@
+{
+  "schemaVersion": "2.0",
+  "preset": {
+    "name": "Prompt Lab minimal preset",
+    "basicPrompts": {
+      "persona": "{{persona}}",
+      "description": "{{description}}",
+      "personality": "{{personality}}",
+      "scenario": "{{scenario}}",
+      "exampleMessageStart": "[Example dialogue]",
+      "chatStart": "[Start of current chat]",
+      "lorebook": "{0}"
+    },
+    "entries": [
+      {
+        "identifier": "main",
+        "name": "Main Prompt",
+        "content": "Write the next reply as {{char}} while respecting the supplied character and world information.",
+        "role": "system",
+        "type": "builtin",
+        "injectionPosition": "relative",
+        "injectionDepth": 4,
+        "forbidOverrides": true,
+        "enabled": true,
+        "active": true
+      },
+      {
+        "identifier": "lab-ejs-mode",
+        "name": "Prompt Lab EJS Mode",
+        "content": "<% const mode = getvar(\"lab_mode\", \"text\"); setvar(\"lab_mode\", mode); %><% if (mode === \"text\") { %>Evaluate the behavior caused by the assembled prompt text.<% } %>",
+        "role": "system",
+        "type": "custom",
+        "injectionPosition": "relative",
+        "injectionDepth": 4,
+        "enabled": true,
+        "active": true
+      },
+      {
+        "identifier": "worldInfoBefore",
+        "name": "Lorebook Before",
+        "content": "",
+        "role": "system",
+        "type": "marker",
+        "injectionPosition": "relative",
+        "injectionDepth": 4,
+        "enabled": true,
+        "active": true
+      },
+      {
+        "identifier": "personaDescription",
+        "name": "Persona Description",
+        "content": "",
+        "role": "system",
+        "type": "marker",
+        "injectionPosition": "relative",
+        "injectionDepth": 4,
+        "enabled": true,
+        "active": true
+      },
+      {
+        "identifier": "charDescription",
+        "name": "Character Description",
+        "content": "",
+        "role": "system",
+        "type": "marker",
+        "injectionPosition": "relative",
+        "injectionDepth": 4,
+        "enabled": true,
+        "active": true
+      },
+      {
+        "identifier": "charPersonality",
+        "name": "Character Personality",
+        "content": "",
+        "role": "system",
+        "type": "marker",
+        "injectionPosition": "relative",
+        "injectionDepth": 4,
+        "enabled": true,
+        "active": true
+      },
+      {
+        "identifier": "scenario",
+        "name": "Scenario",
+        "content": "",
+        "role": "system",
+        "type": "marker",
+        "injectionPosition": "relative",
+        "injectionDepth": 4,
+        "enabled": true,
+        "active": true
+      },
+      {
+        "identifier": "worldInfoAfter",
+        "name": "Lorebook After",
+        "content": "",
+        "role": "system",
+        "type": "marker",
+        "injectionPosition": "relative",
+        "injectionDepth": 4,
+        "enabled": true,
+        "active": true
+      },
+      {
+        "identifier": "dialogueExamples",
+        "name": "Dialogue Examples",
+        "content": "",
+        "role": "system",
+        "type": "marker",
+        "injectionPosition": "relative",
+        "injectionDepth": 4,
+        "enabled": true,
+        "active": true
+      },
+      {
+        "identifier": "chatHistory",
+        "name": "Chat History",
+        "content": "",
+        "role": "system",
+        "type": "marker",
+        "injectionPosition": "relative",
+        "injectionDepth": 4,
+        "enabled": true,
+        "active": true
+      }
+    ]
+  },
+  "character": {
+    "spec": "chara_card_v2",
+    "spec_version": "2.0",
+    "data": {
+      "name": "Example Character",
+      "description": "{{char}} is a careful guide.",
+      "personality": "Observant and concise.",
+      "scenario": "{{char}} and {{user}} are exploring an old observatory.",
+      "first_mes": "The observatory door is open. What should we inspect first?",
+      "alternate_greetings": [],
+      "mes_example": "<START>\n{{user}}: What do you notice?\n{{char}}: Fresh footprints beside the telescope."
+    }
+  },
+  "persona": {
+    "name": "User",
+    "description": "A curious visitor who checks evidence before drawing conclusions."
+  },
+  "worldbooks": [
+    {
+      "name": "Observatory facts",
+      "entries": [
+        {
+          "identifier": "brass-key",
+          "name": "Brass key",
+          "content": "A brass key marked 17 opens the telescope cabinet.",
+          "enabled": true,
+          "strategy": "keyword",
+          "keywords": ["brass key", "telescope cabinet"],
+          "secondaryKeywords": [],
+          "secondaryKeywordStrategy": "none",
+          "scanDepth": 2,
+          "caseSensitive": false,
+          "matchWholeWord": false,
+          "injectionPosition": "lorebookAfter",
+          "injectionDepth": 4,
+          "injectionRole": "system",
+          "probability": 100,
+          "sticky": 0,
+          "cooldown": 0,
+          "delay": 0
+        }
+      ]
+    }
+  ],
+  "history": [],
+  "greeting": "first",
+  "userInput": "I found a brass key. What does it open?",
+  "seed": 0,
+  "ejs": {
+    "mode": "sandboxed",
+    "timeoutMs": 500,
+    "characterId": "example-character",
+    "variables": {
+      "chat": {},
+      "global": {}
+    }
+  },
+  "macroValues": {},
+  "model": {
+    "id": "replace-with-model-id",
+    "baseUrl": "https://replace-with-provider.example/v1",
+    "parameters": {
+      "temperature": 0.7,
+      "max_tokens": 800
+    }
+  }
+}
