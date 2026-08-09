@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://codex.local/tavo/schemas/st-card-v2.schema.json",
+  "$id": "https://example.invalid/tavo-skill/schemas/st-card-v2.schema.json",
   "title": "SillyTavern Character Card V2 Portable Baseline",
   "type": "object",
   "required": ["spec", "spec_version", "data"],

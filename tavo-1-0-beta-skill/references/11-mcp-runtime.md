@@ -1,104 +1,95 @@
 # MCP Runtime
 
-This reference covers direct HTTP JSON-RPC operation against Tavo's built-in MCP server. It documents Tavo's own MCP surface only; project-specific MCP client/plugin logic does not belong in this Skill.
+This reference covers direct HTTP JSON-RPC operation against Tavo's built-in MCP server. It documents Tavo's own MCP surface only; project-specific clients and plugins are outside this Skill.
 
-## Official Page And Security
+## Applicable Versions
 
-- `https://docs.tavoai.dev/cn/guides/mcp-server/`
-- The server exists since v0.91.0, is disabled by default, and uses a bearer token plus an app-selected access scope.
-- Never store or print the bearer token. Saved dumps must redact authorization values and scrub sensitive URL data.
-- Common official failure classes are `401` bad/missing token, `403` insufficient scope, `404/405` wrong URL or method, and timeout/reachability failures.
+- The built-in MCP server is available from Tavo 0.91 onward, is disabled by default, and requires a bearer token plus an app-selected access scope.
+- Tavo 1.0 uses MCP protocol `2025-06-18` for the currently exposed server surface.
+- In Tavo 1.0, external MCP groups cover status, characters, lorebooks, regexes, presets, personas, chats, messages, input, plugins, and memory.
+- Variables and files are still planned on the external MCP surface. Generation and image generation are deferred, and diagnostics are partial.
+- No external MCP tool is currently exposed for ASR/STT, transcription, or microphone control. This does not mean that the Tavo app itself has no speech-recognition feature.
 
-Preferred access for this workflow is direct HTTP JSON-RPC. Invoke app tools through `tools/call`; do not treat tool names as top-level JSON-RPC methods.
+## Call Shape
 
-## Current 1.0 Gate
+Prefer direct HTTP JSON-RPC. Invoke Tavo tools through `tools/call`; a tool name is not a top-level JSON-RPC method.
 
-`live-verified` on 2026-08-07:
-
-- server identity: Tavo `1.0.0`;
-- 72 tools, 19 resources, 7 resource templates, 0 prompts;
-- `initialize`, `tools/list`, `resources/list`, `resources/templates/list`, and `prompts/list` all returned without failure;
-- every dynamically discovered docs/schema resource read successfully;
-- the operator gate also called `tools/call -> tavo_status` successfully;
-- one authorized Android device exposed package `app.bitbear.tav` versionName `1.0.0`.
-
-Durable redacted evidence:
-
-- `assets/evidence/1.0.0/20260807-gate.json`
-- `assets/evidence/1.0.0/20260807-agent-loop-mcp-live-matrix.json`
-
-The exact 0.93 -> 1.0 surface delta added `tavo_memory_get`, `tavo_memory_update`, `tavo_memory_append`, and `tavo://docs/tool-calling`; it removed `tavo_message_insert`. Nineteen same-name tool schemas/descriptions also changed. Use `scripts/compare_mcp_surfaces.py` on raw dumps after each release instead of inferring equivalence from similar counts.
-
-This gate proves reachability, identity, discovery, document readability, one harmless status call, and current Android readiness. It does not prove every tool, model, TTS, generation, theme, backup, ASR, or UI semantic by itself. The retained 0.93 gate and matrix remain prior-version evidence for broad features not rerun in the 1.0 overlay.
-
-## Protocol Version Distinction
-
-The current `tavo://capabilities` resource declares MCP protocol `2025-06-18`. Both the redacted 0.93 and 1.0 strict gates requested and negotiated `2025-06-18`. Record both the request and actual response for each artifact:
-
-- use the runtime-declared `2025-06-18` as the default protocol request for refreshed clients;
-- record the actual `initialize.result.protocolVersion` returned by the server;
-- never rewrite a negotiated value to match the requested value.
-
-A request/response difference is evidence, not by itself a failure. A strict gate fails only when required calls/resources fail or the negotiated protocol is unusable for the tested client.
-
-## Strict Readiness Contract
-
-A current strict dump must fail closed unless all of these pass:
-
-1. `initialize`;
-2. `tools/list`;
-3. `resources/list`;
-4. `resources/templates/list`;
-5. `prompts/list`;
-6. every dynamically discovered docs/schema/capabilities/runtime resource read;
-7. one `tools/call` of `tavo_status`.
-
-The dump must save `serverInfo`, requested and negotiated protocol versions, counts, failed top-level calls, failed resource reads, and document read status. Do not downgrade a missing prompts call or failed dynamic document to a warning in strict mode.
-
-`scripts/test_dump_mcp_surface.py` is the offline regression test for this strict contract: prompts/list, every resource read, and `tavo_status` are required, and requested/negotiated protocol plus status success must appear in the summary.
-
-## Current Runtime Boundary
-
-Available external MCP groups cover status, characters, lorebooks, regexes, presets, personas, chats, messages, input, plugins, and memory. Variables/files remain declared planned; generation/image generation remain deferred; diagnostics are partial.
-
-Memory is no longer deferred in MCP 1.0. `tavo_memory_append` was live-verified for no-op dry run, ordered accumulation, idempotent `clientRequestId`, stale `expectedRevision` rejection without mutation, and exact restoration. Keep these semantics separate from automatic memory extraction/injection, which this case did not prove.
-
-Middle-message insertion is no longer exposed. `tavo_message_insert` disappeared, and `tavo_message_append` ignored a supplied `message.index` and appended at the end in a disposable-chat regression test. Do not emulate insert by relying on an undocumented append index.
-
-The retained 0.93 surface had no ASR/STT/speech-recognition/transcription/microphone tool, resource, resource template, or schema, and no such addition appeared in the 1.0 surface delta. Report this as “not exposed through current MCP,” not “the app has no ASR.” The native 0.93 UI exposed OpenRouter/custom ASR configuration; that UI path was not rerun in the 1.0 overlay.
-
-The external MCP server is not the native in-chat Agent Loop. The latter has a separate 58-tool built-in catalog and dynamic discovery rules documented in `tavo://docs/tool-calling`; read `references/28-tavo-100-live-evidence.md` before comparing the two surfaces.
-
-Current plugin contracts are present in `tavo://docs/plugins` and `tavo://docs/tavojs`, including spec 2/i18n, root `entry`, legacy alias precedence, hook-only entry, config/i18n reads, chat/message notifications, input interception, generation lifecycle Hooks, TTS, and structured `tavo.input.send()` results. Those are `mcp-runtime`; schema/document visibility is not Android effect or semantic proof.
-
-## Runtime Principles
-
-- Reread connectivity, version, endpoint, and token state for every live run.
-- Prefer read/list before write and dry-run before actual write where exposed.
-- Treat runtime docs as point-in-time evidence for the connected app version.
-- Preserve stable IDs/revisions and read back every actual write.
-- Keep visual, persistence, audio, import, and semantic proof separate.
-- Restore the exact user chat/input/API/theme/voice/plugin state after isolated writes.
-
-## Evidence Layout
-
-Use a unique case directory:
-
-```text
-artifacts/tavo-validation/YYYYMMDD-<case>/
-  run-manifest.json
-  device.txt
-  package.txt
-  mcp_surface.json
-  mcp-requests-redacted.jsonl
-  mcp-responses-redacted.jsonl
-  ui-before.xml
-  ui-after.xml
-  screen-before.png
-  screen-after.png
-  readback.json
-  restoration.json
-  notes.md
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "tavo_status",
+    "arguments": {}
+  }
+}
 ```
 
-Record app/device version, current chat, tool names, retained test object IDs, restore actions, and final evidence tier. Keep bearer tokens, API keys, backup contents, and unredacted provider bodies out of the Skill and repository.
+Use the protocol version declared by the connected runtime as the requested version, and retain the actual `initialize.result.protocolVersion` returned by the server. A difference between requested and negotiated versions is not automatically a failure; the client must judge whether the negotiated version is usable.
+
+The bundled client is intentionally limited to the Tavo 1.0 protocol shown above and to `initialize`, `ping`, `tools/list`, and `tools/call`. It fails closed unless the initialize result contains the expected protocol, a capabilities object, and non-empty server name/version metadata. After a valid initialize response it sends `notifications/initialized`, carries the returned session ID and protocol header into the requested call, and refuses tool methods unless the server advertises the tools capability. JSON-RPC requests require an HTTP 200 `application/json` response; the initialized notification accepts only an empty HTTP 202 or 204 response. The client rejects SSE, disables environment proxies, never follows HTTP redirects, always redacts responses, and rejects credentials embedded in endpoint URLs. Connection configuration is an indivisible pair: either one explicitly selected mode-0600 endpoint JSON file supplies both URL and authorization, or `TAVO_MCP_URL` and `TAVO_MCP_AUTH` are both set; file and environment values are never mixed. HTTPS is required by default; non-loopback HTTP needs the explicit `--allow-insecure-http` acknowledgement. Endpoint URLs may not contain user information, query parameters, or fragments, and an output path may not overwrite the endpoint file or any alias/hardlink to it.
+
+Common failure classes:
+
+- `401`: missing or invalid bearer token.
+- `403`: the selected access scope does not allow the operation.
+- `404` or `405`: wrong endpoint or HTTP method.
+- timeout or connection failure: endpoint unreachable, app unavailable, or network route unavailable.
+
+## Tavo 1.0 Boundaries
+
+### Memory
+
+External MCP memory operations are available in Tavo 1.0. Safe clients should expect:
+
+- dry-run without mutation;
+- ordered append behavior;
+- idempotency when the same `clientRequestId` is reused;
+- stale `expectedRevision` rejection without mutation.
+
+These operations maintain the memory asset. They do not by themselves prove automatic extraction from conversation or automatic injection into every model request.
+
+### Messages
+
+Middle-message insertion is not exposed in Tavo 1.0. `tavo_message_append` appends at the end; supplying an undocumented `message.index` must not be treated as insertion. Read and update targets should use stable message IDs because numeric indices can move.
+
+### Agent Loop
+
+The external MCP server and Tavo's native in-chat Agent Loop are separate tool surfaces:
+
+- external MCP is called by an outside client over HTTP JSON-RPC;
+- Agent Loop places Tavo's built-in tool schemas into a model conversation and executes returned tool calls;
+- availability on one surface does not imply availability on the other;
+- character cards and plugins do not automatically own or register Agent Loop tools.
+
+### Plugins
+
+The current plugin surface includes spec-2 packaging, localization, root `entry`, legacy entry compatibility, hook-only entry, configuration and localization reads, chat/message notifications, input interception, generation lifecycle hooks, TTS, and structured `tavo.input.send()` results. A schema or runtime contribution being visible proves registration only; it does not prove button behavior, visual layout, audio quality, or every hook branch.
+
+## Safe Operation
+
+- Never store, print, commit, or paste the bearer token into prompts, screenshots, logs, issues, or deliverables.
+- Confirm the connected Tavo version before relying on a tool or schema.
+- Prefer read/search before write, and dry-run before an actual write when supported.
+- Read the target immediately before writing; preserve stable IDs and current revisions.
+- Use a stable `clientRequestId` for retries so a transport retry does not duplicate a write.
+- Apply the smallest patch possible and read the object back after every actual write.
+- Treat a successful call as acceptance, not proof of final state. Verify persistence by stable ID and revision.
+- Keep visual, audio, model-semantic, import, and persistence checks separate.
+- Restore any temporarily changed chat, input, provider, theme, voice, or plugin state.
+- Destructive actions such as delete, reset, uninstall, or overwrite require explicit user intent even when the access scope permits them.
+
+## Minimal Compatibility Check
+
+Before a user-authorized MCP workflow, confirm only what that workflow needs:
+
+1. initialize the session and record the negotiated protocol;
+2. confirm the required tool names and input fields exist;
+3. call the harmless status tool;
+4. read the target object and revision;
+5. dry-run the intended minimal mutation;
+6. perform the actual write only if authorized;
+7. read back the final object and restore temporary state.
+
+Do not infer broad product compatibility from tool counts, one successful status call, or a similarly named tool in another Tavo version.

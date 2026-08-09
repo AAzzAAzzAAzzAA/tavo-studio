@@ -33,7 +33,7 @@ def write_manifest(root: Path, payload: dict[str, object]) -> None:
 
 def valid_v2_manifest() -> dict[str, object]:
     return {
-        "id": "codex.spec2.test",
+        "id": "community.spec2.test",
         "name": "Spec 2 Test",
         "version": "1.0.0",
         "specVersion": 2,
@@ -98,9 +98,9 @@ class TpgPackageFixtureTests(unittest.TestCase):
     def test_root_manifest_wins_over_multiple_nested_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            write_manifest(root, {"id": "codex.root-wins", "name": "Root Wins", "version": "0.92.0"})
-            write_manifest(root / "one", {"id": "codex.one", "name": "One", "version": "0.92.0"})
-            write_manifest(root / "two", {"id": "codex.two", "name": "Two", "version": "0.92.0"})
+            write_manifest(root, {"id": "community.root-wins", "name": "Root Wins", "version": "0.92.0"})
+            write_manifest(root / "one", {"id": "community.one", "name": "One", "version": "0.92.0"})
+            write_manifest(root / "two", {"id": "community.two", "name": "Two", "version": "0.92.0"})
             result = validate_package(root)
             self.assertEqual((), result.errors)
             self.assertEqual(root.resolve(), result.plugin_root)
@@ -130,7 +130,7 @@ class TpgPackageFixtureTests(unittest.TestCase):
             write_manifest(
                 root,
                 {
-                    "id": "codex.no-entry",
+                    "id": "community.no-entry",
                     "name": "No Entry",
                     "version": "0.92.0",
                     "contributes": {"inputActions": [{"id": "x", "label": "X"}]},
@@ -147,7 +147,7 @@ class TpgPackageFixtureTests(unittest.TestCase):
             root = base / "plugin"
             write_manifest(
                 root,
-                {"id": "codex.external-link", "name": "External Link", "version": "0.92.0", "entry": "entry.js"},
+                {"id": "community.external-link", "name": "External Link", "version": "0.92.0", "entry": "entry.js"},
             )
             outside = base / "outside.js"
             outside.write_text("external marker\n", encoding="utf-8")
@@ -161,7 +161,7 @@ class TpgPackageFixtureTests(unittest.TestCase):
             root = Path(tmp)
             old_manifest = root / "tavo-plugin.json"
             old_manifest.write_text(
-                json.dumps({"id": "codex.old-name", "name": "Old Name", "version": "0.91.0"}),
+                json.dumps({"id": "community.old-name", "name": "Old Name", "version": "0.91.0"}),
                 encoding="utf-8",
             )
             self.assertTrue(any("missing manifest.json" in error for error in validate_package(root).errors))
@@ -206,7 +206,7 @@ class TpgPackageFixtureTests(unittest.TestCase):
             with self.subTest(spec=spec), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 manifest: dict[str, object] = {
-                    "id": "codex.spec1.compat",
+                    "id": "community.spec1.compat",
                     "name": "$ remains literal in v1",
                     "version": "release-candidate",
                     "minAppVersion": "any-old-version",
@@ -313,7 +313,7 @@ class TpgPackageFixtureTests(unittest.TestCase):
             write_manifest(
                 root,
                 {
-                    "id": "codex.spec1.i18n",
+                    "id": "community.spec1.i18n",
                     "name": {"$t": "plugin.name"},
                     "version": "legacy",
                     "specVersion": 1,
@@ -497,7 +497,7 @@ class TpgPackageFixtureTests(unittest.TestCase):
             write_manifest(
                 root,
                 {
-                    "id": "codex.spec1.structured-select",
+                    "id": "community.spec1.structured-select",
                     "name": "Legacy",
                     "version": "legacy",
                     "specVersion": 1,

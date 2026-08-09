@@ -5,11 +5,13 @@ import contextlib
 import io
 import json
 import os
+import re
 import stat
 import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -103,7 +105,80 @@ def constant(identifier: str, content: str, position: str, **extra: object) -> d
     }
 
 
+def regex_entry(
+    identifier: str,
+    find_regex: str,
+    replacement: str,
+    *,
+    placements: list[str],
+    timing: str,
+    substitution: str = "none",
+    min_depth: int | None = None,
+    max_depth: int | None = None,
+) -> dict:
+    return {
+        "identifier": identifier,
+        "name": identifier,
+        "findRegex": find_regex,
+        "replaceString": replacement,
+        "trimStrings": [],
+        "placements": placements,
+        "timing": timing,
+        "substitution": substitution,
+        "minDepth": min_depth,
+        "maxDepth": max_depth,
+        "enabled": True,
+    }
+
+
+def regex_group(name: str, *entries: dict) -> dict:
+    return {"name": name, "entries": list(entries)}
+
+
+def request_text(result: dict) -> str:
+    return "\n".join(item["content"] for item in result["request"]["messages"])
+
+
 class PromptLabCompileTests(unittest.TestCase):
+    def test_native_tavo_10_role_adapter_keeps_only_leading_system_role(self) -> None:
+        post = {
+            "identifier": "post",
+            "content": "POST",
+            "role": "system",
+            "type": "custom",
+            "injectionPosition": "relative",
+            "enabled": True,
+            "active": True,
+        }
+        result = lab.compile_case(
+            {
+                "preset": base_preset(
+                    marker("personaDescription"),
+                    marker("chatHistory"),
+                    post,
+                ),
+                "character": character(),
+                "persona": {"name": "Rin", "description": "Tester."},
+                "userInput": "GO",
+            },
+            Path.cwd(),
+        )
+
+        self.assertEqual(
+            [item["role"] for item in result["request"]["messages"]],
+            ["system", "user", "assistant", "user"],
+        )
+        self.assertEqual(result["request"]["messages"][0]["content"], "MAIN Mira / Rin")
+        self.assertEqual(
+            result["request"]["messages"][1]["content"],
+            "Persona: Tester.\n\n[Start of current chat]",
+        )
+        self.assertEqual(result["request"]["messages"][3]["content"], "GO\n\nPOST")
+        self.assertEqual(
+            [item["coerced"] for item in result["adapterTrace"]],
+            [False, True, True, False, False, True],
+        )
+
     def test_relative_order_examples_greeting_worldbook_positions_and_hidden_history(self) -> None:
         preset = base_preset(
             marker("worldInfoBefore"),
@@ -141,7 +216,7 @@ class PromptLabCompileTests(unittest.TestCase):
         case = {
             "preset": preset,
             "character": character(),
-            "persona": {"name": "Alex", "description": "A patient tester."},
+            "persona": {"name": "Rin", "description": "A patient tester."},
             "worldbooks": [lore],
             "history": [{"role": "assistant", "content": "HIDDEN", "hidden": True}],
             "userInput": "The dragon is here.",
@@ -150,26 +225,29 @@ class PromptLabCompileTests(unittest.TestCase):
 
         result = lab.compile_case(case, Path.cwd())
 
-        self.assertEqual([item["role"] for item in result["request"]["messages"]], ["system", "assistant", "user"])
-        expected_system = "\n\n".join(
+        self.assertEqual(
+            [item["role"] for item in result["request"]["messages"]],
+            ["system", "user", "assistant", "user"],
+        )
+        expected_context = "\n\n".join(
             [
-                "MAIN Mira / Alex",
-                "BEFORE",
+                "BEFORE\n",
                 "Persona: A patient tester.",
                 "Description: A careful cartographer.",
                 "Personality: Precise.",
-                "Scenario: Mira maps a dragon valley with Alex.",
-                "AFTER Mira",
-                "[Example dialogue]\n\nMira: TOP\n\n[Example dialogue]\n\nAlex: Where?\n\nMira: North.\n\n[Example dialogue]\n\nMira: BOTTOM",
+                "Scenario: Mira maps a dragon valley with Rin.",
+                "AFTER Mira\n",
+                "[Example dialogue]\n\nMira: TOP\n\n[Example dialogue]\n\nRin: Where?\n\nMira: North.\n\n[Example dialogue]\n\nMira: BOTTOM",
                 "[Start of current chat]",
             ]
         )
-        self.assertEqual(result["request"]["messages"][0]["content"], expected_system)
+        self.assertEqual(result["request"]["messages"][0]["content"], "MAIN Mira / Rin")
+        self.assertEqual(result["request"]["messages"][1]["content"], expected_context)
         self.assertEqual(
-            result["request"]["messages"][1]["content"],
-            "Welcome, Alex.\n\nAT DEPTH",
+            result["request"]["messages"][2]["content"],
+            "Welcome, Rin.\n\nAT DEPTH",
         )
-        self.assertEqual(result["request"]["messages"][2]["content"], "The dragon is here.")
+        self.assertEqual(result["request"]["messages"][3]["content"], "The dragon is here.")
         self.assertEqual(len(result["triggeredWorldbooks"]), 5)
         decisions = {item["entry"]: item["status"] for item in result["worldbookDecisions"]}
         self.assertEqual(decisions["miss"], "keyword_miss")
@@ -177,6 +255,33 @@ class PromptLabCompileTests(unittest.TestCase):
         self.assertIn("hidden_history_omitted", warning_codes)
         self.assertIn("scan_depth_policy", warning_codes)
         self.assertNotIn("HIDDEN", json.dumps(result))
+
+    def test_lorebook_wrapper_without_zero_slot_drops_activated_content(self) -> None:
+        preset = base_preset(marker("worldInfoAfter"), marker("chatHistory"))
+        preset["basicPrompts"]["lorebook"] = "[WRAPPER-WITHOUT-SLOT]"
+        result = lab.compile_case(
+            {
+                "preset": preset,
+                "character": character(),
+                "worldbooks": [
+                    worldbook(
+                        [constant("constant-after", "SECRET-LORE-CONTENT", "lorebookAfter")]
+                    )
+                ],
+                "greeting": False,
+                "userInput": "go",
+            },
+            Path.cwd(),
+        )
+
+        joined = request_text(result)
+        self.assertIn("[WRAPPER-WITHOUT-SLOT]", joined)
+        self.assertNotIn("SECRET-LORE-CONTENT", joined)
+        self.assertEqual(result["worldbookDecisions"][0]["status"], "triggered")
+        self.assertIn(
+            "lorebook_wrapper_missing_slot",
+            {item["code"] for item in result["warnings"]},
+        )
 
     def test_single_chat_preserves_name_and_warns_for_unconsumed_character_fields(self) -> None:
         preset = base_preset(marker("dialogueExamples"), marker("chatHistory"))
@@ -201,7 +306,7 @@ class PromptLabCompileTests(unittest.TestCase):
                     "entries": [],
                 },
             ),
-            "persona": {"name": "Alex", "description": ""},
+            "persona": {"name": "Rin", "description": ""},
             "worldbooks": [lore],
             "userInput": "Hello, {{char}}.",
             "model": "fixture-model",
@@ -210,10 +315,10 @@ class PromptLabCompileTests(unittest.TestCase):
         result = lab.compile_case(case, Path.cwd())
         joined = "\n".join(item["content"] for item in result["request"]["messages"])
 
-        self.assertIn("MAIN Mira / Alex", joined)
+        self.assertIn("MAIN Mira / Rin", joined)
         self.assertIn("[Example dialogue]\n\nMira: TOP", joined)
         self.assertIn("Mira: North.", joined)
-        self.assertIn("Welcome, Alex.", joined)
+        self.assertIn("Welcome, Rin.", joined)
         self.assertIn("Hello, Mira.", joined)
         self.assertNotIn("Northstar", joined)
         warning_codes = {item["code"] for item in result["warnings"]}
@@ -385,15 +490,15 @@ class PromptLabCompileTests(unittest.TestCase):
             {
                 "preset": base_preset(prompt, marker("chatHistory")),
                 "character": character(),
-                "persona": {"name": "Alex", "description": ""},
+                "persona": {"name": "Rin", "description": ""},
                 "greeting": False,
                 "userInput": "hello",
                 "ejs": {"variables": {"chat": {}, "global": {}}},
             },
             Path.cwd(),
         )
-        content = result["request"]["messages"][0]["content"]
-        self.assertIn("ALPHA:Mira/Alex:123", content)
+        content = request_text(result)
+        self.assertIn("ALPHA:Mira/Rin:123", content)
         self.assertNotIn("<%", content)
         self.assertNotIn("{{char}}", content)
         self.assertEqual(result["ejs"]["variables"]["final"]["chat"], {"mode": "alpha", "turn": 1})
@@ -429,7 +534,7 @@ class PromptLabCompileTests(unittest.TestCase):
             },
             Path.cwd(),
         )
-        joined = result["request"]["messages"][0]["content"]
+        joined = request_text(result)
         self.assertIn("HP=41 G=5", joined)
         self.assertIn("41/5", joined)
         self.assertEqual(result["ejs"]["variables"]["final"], {"chat": {"player": {"hp": 41}}, "global": {"score": 5}})
@@ -453,19 +558,19 @@ class PromptLabCompileTests(unittest.TestCase):
                 ),
                 "character": card,
                 "persona": {
-                    "name": "Alex",
+                    "name": "Rin",
                     "description": '<% print("Persona ") %><%- "{{user}}" %>',
                 },
                 "userInput": "go",
             },
             Path.cwd(),
         )
-        system = result["request"]["messages"][0]["content"]
-        self.assertIn("Persona: Persona Alex", system)
-        self.assertIn("Description: Card Mira / Alex", system)
-        self.assertIn("Personality: Ready", system)
-        self.assertIn("Mira: Example rendered", system)
-        self.assertEqual(result["selectedGreeting"]["renderedContent"], "Greeting Alex")
+        prompt = request_text(result)
+        self.assertIn("Persona: Persona Rin", prompt)
+        self.assertIn("Description: Card Mira / Rin", prompt)
+        self.assertIn("Personality: Ready", prompt)
+        self.assertIn("Mira: Example rendered", prompt)
+        self.assertEqual(result["selectedGreeting"]["renderedContent"], "Greeting Rin")
         self.assertFalse(any("<%" in item["content"] for item in result["request"]["messages"]))
         sources = {item["source"] for item in result["ejs"]["fieldTrace"]}
         self.assertTrue(
@@ -501,7 +606,7 @@ class PromptLabCompileTests(unittest.TestCase):
             },
             Path.cwd(),
         )
-        content = result["request"]["messages"][0]["content"]
+        content = request_text(result)
         self.assertIn("A1<2|1&lt;2|<% raw %>|<% untouched %>\nBC", content)
 
     def test_ejs_error_falls_back_whole_field_and_rolls_back_state(self) -> None:
@@ -524,7 +629,12 @@ class PromptLabCompileTests(unittest.TestCase):
             },
             Path.cwd(),
         )
-        self.assertIn(source, result["request"]["messages"][0]["content"])
+        rendered = request_text(result)
+        self.assertIn(
+            '<% setvar("kept", 1); missingFunction(); %>BROKEN Mira',
+            rendered,
+        )
+        self.assertNotIn("BROKEN {{char}}", rendered)
         self.assertEqual(result["ejs"]["variables"]["final"]["chat"], {})
         self.assertEqual(result["ejs"]["unresolvedSources"], ["preset:broken"])
         self.assertIn("ejs_render_error_fallback", {item["code"] for item in result["warnings"]})
@@ -541,7 +651,7 @@ class PromptLabCompileTests(unittest.TestCase):
             {
                 "preset": base_preset(marker("worldInfoAfter"), marker("chatHistory")),
                 "character": character(),
-                "persona": {"name": "Alex", "description": ""},
+                "persona": {"name": "Rin", "description": ""},
                 "worldbooks": [worldbook([entry])],
                 "greeting": False,
                 "userInput": "A dragon arrives",
@@ -549,7 +659,7 @@ class PromptLabCompileTests(unittest.TestCase):
             Path.cwd(),
         )
         self.assertEqual(result["worldbookDecisions"][0]["matchedKeywords"], ["dragon"])
-        self.assertIn("LORE Alex", result["request"]["messages"][0]["content"])
+        self.assertIn("LORE Rin", request_text(result))
         self.assertEqual(result["ejs"]["fieldsRendered"], 2)
 
     def test_complex_prompt_javascript_subset_and_lodash_helpers(self) -> None:
@@ -578,7 +688,7 @@ class PromptLabCompileTests(unittest.TestCase):
             },
             Path.cwd(),
         )
-        self.assertIn("WIDE:2020", result["request"]["messages"][0]["content"])
+        self.assertIn("WIDE:2020", request_text(result))
 
     def test_ejs_policy_and_timeout_fail_closed(self) -> None:
         for identifier, source in (
@@ -606,7 +716,7 @@ class PromptLabCompileTests(unittest.TestCase):
                     },
                     Path.cwd(),
                 )
-                self.assertIn(source, result["request"]["messages"][0]["content"])
+                self.assertIn(source, request_text(result))
                 self.assertEqual(result["ejs"]["unresolvedSources"], [f"preset:{identifier}"])
 
     def test_runtime_chat_ejs_is_literal_but_macros_still_run(self) -> None:
@@ -620,7 +730,10 @@ class PromptLabCompileTests(unittest.TestCase):
             },
             Path.cwd(),
         )
-        self.assertEqual(result["request"]["messages"][-1]["content"], '<% setvar("unsafe", 1); %>hello')
+        self.assertEqual(
+            result["request"]["messages"][-1]["content"],
+            '[Start of current chat]\n\n<% setvar("unsafe", 1); %>hello',
+        )
         self.assertEqual(result["ejs"]["variables"]["final"]["chat"], {"safe": 2})
         self.assertEqual(result["ejs"]["unresolvedSources"], [])
         self.assertIn("runtime_ejs_literal", {item["code"] for item in result["warnings"]})
@@ -689,7 +802,7 @@ class PromptLabCompileTests(unittest.TestCase):
         case = {
             "preset": raw_preset,
             "character": character(),
-            "persona": {"name": "Alex", "description": "A patient tester."},
+            "persona": {"name": "Rin", "description": "A patient tester."},
             "userInput": "hello",
         }
         result = lab.compile_case(case, Path.cwd())
@@ -700,10 +813,10 @@ class PromptLabCompileTests(unittest.TestCase):
         )
         self.assertEqual(
             result["request"]["messages"][0]["content"],
-            "MAIN Mira / Alex\n\nA patient tester.\n\nA careful cartographer.\n\n[Start a new Chat]",
+            "MAIN Mira / Rin\n\nA patient tester.\n\nA careful cartographer.\n\n[Start a new Chat]",
         )
-        self.assertEqual(result["request"]["messages"][1]["content"], "Welcome, Alex.")
-        self.assertEqual(result["request"]["messages"][2]["content"], "hello\n\nSTYLE Alex")
+        self.assertEqual(result["request"]["messages"][1]["content"], "Welcome, Rin.")
+        self.assertEqual(result["request"]["messages"][2]["content"], "hello\n\nSTYLE Rin")
         self.assertEqual(
             result["compatibility"]["presetInput"],
             "tavo-exported-prompts-prompt_order-relative-v1",
@@ -760,6 +873,64 @@ class PromptLabCompileTests(unittest.TestCase):
         with self.assertRaises(lab.LabError) as raised:
             lab.compile_case(case, Path.cwd())
         self.assertEqual(raised.exception.code, "sensitive_parameter")
+
+    def test_normalized_sensitive_parameter_names_are_rejected(self) -> None:
+        for key in ("api-key", "API Key", "x.api key", "client.secret"):
+            with self.subTest(key=key), self.assertRaises(lab.LabError) as raised:
+                lab.compile_case(
+                    {
+                        "preset": base_preset(marker("chatHistory")),
+                        "character": character(),
+                        "greeting": False,
+                        "userInput": "hello",
+                        "model": {"id": "x", "parameters": {key: "secret"}},
+                    },
+                    Path.cwd(),
+                )
+            self.assertEqual(raised.exception.code, "sensitive_parameter")
+
+    def test_nonfinite_json_values_and_unknown_schema_fail_closed(self) -> None:
+        with self.assertRaises(lab.LabError) as raised:
+            lab.compile_case(
+                {
+                    "schemaVersion": "9.9",
+                    "preset": base_preset(marker("chatHistory")),
+                    "character": character(),
+                    "greeting": False,
+                    "userInput": "hello",
+                },
+                Path.cwd(),
+            )
+        self.assertEqual(raised.exception.code, "unsupported_schema_version")
+        with self.assertRaises(lab.LabError) as raised:
+            lab.compile_case(
+                {
+                    "schemaVersion": "2.3",
+                    "preset": base_preset(marker("chatHistory")),
+                    "character": character(),
+                    "greeting": False,
+                    "userInput": "hello",
+                    "model": {"id": "x", "parameters": {"temperature": float("nan")}},
+                },
+                Path.cwd(),
+            )
+        self.assertEqual(raised.exception.code, "invalid_json_value")
+
+    def test_javascript_replacement_supports_prefix_suffix_and_named_groups(self) -> None:
+        match = re.search(r"(?P<word>b)", "abc")
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(
+            lab.javascript_replacement(match, "$$|$&|$`|$'|$1|$<word>"),
+            "$|b|a|c|b|b",
+        )
+
+    def test_javascript_named_capture_syntax_is_translated_for_replacement(self) -> None:
+        pattern, _global = lab.parse_regex_pattern(r"/(?<word>b)/g", "test")
+        match = pattern.search("abc")
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(lab.javascript_replacement(match, "$<word>"), "b")
 
     def test_nested_sensitive_model_parameters_are_rejected(self) -> None:
         sensitive_key = "api" + "_key"
@@ -834,7 +1005,719 @@ class PromptLabCompileTests(unittest.TestCase):
             Path.cwd(),
         )
         self.assertIn("unsupported_worldbook_position", {item["code"] for item in result["warnings"]})
-        self.assertIn("LEGACY", result["request"]["messages"][0]["content"])
+        self.assertIn("LEGACY", request_text(result))
+
+    def test_multiturn_compile_carries_history_ejs_state_and_keyword_window(self) -> None:
+        counter_prompt = {
+            "identifier": "turn-counter",
+            "content": '<% incvar("turn") %>TURN=<%- getvar("turn") %>',
+            "role": "system",
+            "type": "custom",
+            "injectionPosition": "relative",
+            "enabled": True,
+            "active": True,
+        }
+        keyword_entry = {
+            **constant("window-keyword", "WINDOW_HIT", "lorebookAfter"),
+            "strategy": "keyword",
+            "keywords": ["window-key"],
+            "secondaryKeywords": [],
+            "secondaryKeywordStrategy": "none",
+            "scanDepth": 2,
+            "caseSensitive": False,
+            "matchWholeWord": False,
+        }
+        case = {
+            "preset": base_preset(
+                counter_prompt,
+                marker("worldInfoAfter"),
+                marker("chatHistory"),
+            ),
+            "character": character(),
+            "worldbooks": [worldbook([keyword_entry])],
+            "greeting": False,
+            "turns": [
+                {
+                    "label": "trigger",
+                    "userInput": "window-key first",
+                    "assistantResponse": "assistant-one",
+                },
+                {
+                    "label": "carry",
+                    "userInput": "second",
+                    "assistantResponse": "assistant-two",
+                },
+                {"label": "expire", "userInput": "third"},
+            ],
+        }
+
+        result = lab.compile_session(case, Path.cwd())
+
+        self.assertEqual(result["mode"], "compile-session")
+        self.assertEqual(result["status"], "compiled")
+        self.assertEqual(result["session"]["turnCount"], 3)
+        self.assertEqual(
+            [turn["worldbookDecisions"][0]["status"] for turn in result["turns"]],
+            ["triggered", "keyword_miss", "keyword_miss"],
+        )
+        for index, turn in enumerate(result["turns"], start=1):
+            body = json.dumps(turn["request"], ensure_ascii=False)
+            self.assertIn(f"TURN={index}", body)
+            self.assertEqual(turn["ejs"]["variables"]["final"]["chat"]["turn"], index)
+        second_body = json.dumps(result["turns"][1]["request"], ensure_ascii=False)
+        third_body = json.dumps(result["turns"][2]["request"], ensure_ascii=False)
+        self.assertIn("window-key first", second_body)
+        self.assertIn("assistant-one", second_body)
+        self.assertIn("assistant-two", third_body)
+        self.assertEqual(result["finalEjsVariables"]["chat"]["turn"], 3)
+        self.assertEqual(
+            [item["role"] for item in result["finalHistory"]],
+            ["user", "assistant", "user", "assistant", "user"],
+        )
+
+    def test_multiturn_fallback_rolls_back_field_state_and_checker_persists(self) -> None:
+        failing = constant(
+            "fallback",
+            '<% setvar("mustRollback", "LEAKED"); missingFunction(); %>RAW_FALLBACK',
+            "lorebookAfter",
+        )
+        checker = constant(
+            "checker",
+            (
+                '<% incvar("checkerTurn") %>'
+                'ROLLBACK=<%- getvar("mustRollback", "ROLLED_BACK") %> '
+                'CHECKER=<%- getvar("checkerTurn") %>'
+            ),
+            "lorebookAfter",
+        )
+        case = {
+            "preset": base_preset(marker("worldInfoAfter"), marker("chatHistory")),
+            "character": character(),
+            "worldbooks": [worldbook([failing, checker])],
+            "greeting": False,
+            "turns": [
+                {"userInput": "one", "assistantResponse": "reply-one"},
+                {"userInput": "two"},
+            ],
+        }
+
+        result = lab.compile_session(case, Path.cwd())
+
+        self.assertEqual(result["status"], "compiled")
+        for index, turn in enumerate(result["turns"], start=1):
+            text = json.dumps(turn["request"], ensure_ascii=False)
+            self.assertIn("RAW_FALLBACK", text)
+            self.assertIn("ROLLBACK=ROLLED_BACK", text)
+            self.assertIn(f"CHECKER={index}", text)
+            self.assertTrue(turn["ejs"]["unresolvedSources"])
+        self.assertNotIn("mustRollback", result["finalEjsVariables"]["chat"])
+        self.assertEqual(result["finalEjsVariables"]["chat"]["checkerTurn"], 2)
+
+    def test_multiturn_compile_requires_assistant_fixture_before_next_turn(self) -> None:
+        case = {
+            "preset": base_preset(marker("chatHistory")),
+            "character": character(),
+            "greeting": False,
+            "turns": [
+                {"userInput": "one"},
+                {"userInput": "two"},
+            ],
+        }
+        with self.assertRaises(lab.LabError) as raised:
+            lab.compile_session(case, Path.cwd())
+        self.assertEqual(raised.exception.code, "missing_assistant_response")
+
+    def test_regex_send_and_display_keep_provider_persistent_visible_surfaces_separate(self) -> None:
+        rules = regex_group(
+            "surface split",
+            regex_entry(
+                "user-send",
+                "/SEND_RAW/g",
+                "SEND_MODEL",
+                placements=["user"],
+                timing="send",
+            ),
+            regex_entry(
+                "char-display",
+                "/DISPLAY_RAW/g",
+                "DISPLAY_VISIBLE",
+                placements=["char"],
+                timing="display",
+            ),
+        )
+        result = lab.compile_case(
+            {
+                "preset": base_preset(marker("chatHistory")),
+                "character": character(),
+                "greeting": False,
+                "history": [{"role": "assistant", "content": "DISPLAY_RAW"}],
+                "userInput": "SEND_RAW",
+                "regexes": [rules],
+            },
+            Path.cwd(),
+        )
+
+        self.assertEqual(result["persistentHistory"][-1]["content"], "DISPLAY_RAW")
+        self.assertEqual(result["visibleHistory"][-1]["content"], "DISPLAY_VISIBLE")
+        self.assertEqual(result["persistentUserInput"], "SEND_RAW")
+        self.assertIn("SEND_MODEL", request_text(result))
+        self.assertNotIn("SEND_RAW", request_text(result))
+        self.assertIn("DISPLAY_RAW", request_text(result))
+        self.assertNotIn("DISPLAY_VISIBLE", request_text(result))
+        self.assertEqual(len(result["regex"]["sendTrace"]), 1)
+        self.assertEqual(len(result["regex"]["displayTrace"]), 1)
+
+    def test_regex_receive_persists_then_display_changes_only_visible_response(self) -> None:
+        rules = regex_group(
+            "receive display",
+            regex_entry(
+                "receive",
+                "/RESPONSE_RAW/g",
+                "RESPONSE_PERSIST",
+                placements=["char"],
+                timing="receive",
+            ),
+            regex_entry(
+                "display",
+                "/RESPONSE_PERSIST/g",
+                "RESPONSE_VISIBLE",
+                placements=["char"],
+                timing="display",
+            ),
+        )
+        result = lab.compile_session(
+            {
+                "preset": base_preset(marker("chatHistory")),
+                "character": character(),
+                "greeting": False,
+                "regexes": [rules],
+                "turns": [
+                    {"userInput": "one", "assistantResponse": "RESPONSE_RAW"},
+                    {"userInput": "two"},
+                ],
+            },
+            Path.cwd(),
+        )
+
+        first = result["turns"][0]
+        second_request = json.dumps(result["turns"][1]["request"], ensure_ascii=False)
+        self.assertEqual(first["assistantResponse"], "RESPONSE_RAW")
+        self.assertEqual(first["persistentAssistantResponse"], "RESPONSE_PERSIST")
+        self.assertEqual(first["visibleAssistantResponse"], "RESPONSE_VISIBLE")
+        self.assertIn("RESPONSE_PERSIST", second_request)
+        self.assertNotIn("RESPONSE_RAW", second_request)
+        self.assertNotIn("RESPONSE_VISIBLE", second_request)
+        self.assertEqual(result["finalHistory"][-2]["content"], "RESPONSE_PERSIST")
+
+    def test_regex_lorebook_ejs_macro_and_entry_order_compile_in_runtime_order(self) -> None:
+        rules = regex_group(
+            "ejs order lore",
+            regex_entry(
+                "ejs-raw-to-mid",
+                '<%- "/EJS_RAW/g" %>',
+                '<%- "EJS_MID={{char}}|{{user}}" %>',
+                placements=["user"],
+                timing="send",
+                substitution="raw",
+            ),
+            regex_entry(
+                "mid-to-final",
+                "/EJS_MID=Mira\\|Rin/g",
+                "EJS_FINAL",
+                placements=["user"],
+                timing="send",
+            ),
+            regex_entry(
+                "lore-send",
+                "/LORE_RAW/g",
+                "LORE_MODEL",
+                placements=["lorebook"],
+                timing="send",
+            ),
+        )
+        result = lab.compile_case(
+            {
+                "preset": base_preset(marker("worldInfoAfter"), marker("chatHistory")),
+                "character": character(),
+                "persona": {"name": "Rin", "description": ""},
+                "worldbooks": [worldbook([constant("lore", "LORE_RAW", "lorebookAfter")])],
+                "greeting": False,
+                "userInput": "EJS_RAW",
+                "regexes": [rules],
+            },
+            Path.cwd(),
+        )
+
+        prompt = request_text(result)
+        self.assertIn("EJS_FINAL", prompt)
+        self.assertNotIn("EJS_RAW", prompt)
+        self.assertNotIn("EJS_MID", prompt)
+        self.assertIn("LORE_MODEL", prompt)
+        self.assertNotIn("LORE_RAW", prompt)
+        self.assertNotIn("<%", prompt)
+        self.assertNotIn("{{char}}", prompt)
+        self.assertEqual([item["entry"] for item in result["regex"]["sendTrace"]], ["ejs-raw-to-mid", "mid-to-final"])
+        self.assertEqual(result["regex"]["lorebookSendTrace"][0]["entry"], "lore-send")
+
+    def test_regex_depth_zero_through_six_is_inclusive_and_counts_newest_first(self) -> None:
+        history = [
+            {"role": "user", "content": "RAW_6"},
+            {"role": "assistant", "content": "RAW_5"},
+            {"role": "user", "content": "RAW_4"},
+            {"role": "assistant", "content": "RAW_3"},
+            {"role": "user", "content": "RAW_2"},
+            {"role": "assistant", "content": "RAW_1"},
+        ]
+        entries = [
+            regex_entry(
+                f"depth-{depth}",
+                f"/RAW_{depth}/g",
+                f"HIT_{depth}",
+                placements=["user" if depth % 2 == 0 else "char"],
+                timing="send",
+                min_depth=depth,
+                max_depth=depth,
+            )
+            for depth in range(7)
+        ]
+        result = lab.compile_case(
+            {
+                "preset": base_preset(marker("chatHistory")),
+                "character": character(),
+                "greeting": False,
+                "history": history,
+                "userInput": "RAW_0",
+                "regexes": [regex_group("depth", *entries)],
+            },
+            Path.cwd(),
+        )
+
+        prompt = request_text(result)
+        for depth in range(7):
+            self.assertIn(f"HIT_{depth}", prompt)
+            self.assertNotIn(f"RAW_{depth}", prompt)
+        self.assertEqual(
+            sorted(item["depth"] for item in result["regex"]["sendTrace"]),
+            list(range(7)),
+        )
+
+    def test_regex_unverified_reasoning_trim_escaped_and_lore_depth_fail_closed(self) -> None:
+        invalid_entries = [
+            (
+                regex_entry("reasoning", "/x/g", "y", placements=["reasoning"], timing="send"),
+                "unsupported_regex_reasoning",
+            ),
+            (
+                {**regex_entry("trim", "/x/g", "y", placements=["user"], timing="send"), "trimStrings": ["x"]},
+                "unsupported_regex_trim_strings",
+            ),
+            (
+                regex_entry("escaped", "/x/g", "y", placements=["user"], timing="send", substitution="escaped"),
+                "unsupported_regex_escaped_substitution",
+            ),
+            (
+                regex_entry("lore-depth", "/x/g", "y", placements=["lorebook"], timing="send", min_depth=0, max_depth=0),
+                "unsupported_regex_lorebook_depth",
+            ),
+        ]
+        for entry, expected_code in invalid_entries:
+            with self.subTest(expected_code=expected_code):
+                with self.assertRaises(lab.LabError) as raised:
+                    lab.compile_case(
+                        {
+                            "preset": base_preset(marker("chatHistory")),
+                            "character": character(),
+                            "greeting": False,
+                            "userInput": "x",
+                            "regexes": [regex_group("invalid", entry)],
+                        },
+                        Path.cwd(),
+                    )
+                self.assertEqual(raised.exception.code, expected_code)
+
+
+class PromptLabProviderAdapterTests(unittest.TestCase):
+    def test_supported_json_response_shapes_extract_text(self) -> None:
+        fixtures = [
+            ({"choices": [{"message": {"content": "chat"}}]}, "chat"),
+            (
+                {"choices": [{"message": {"content": [{"type": "text", "text": "array"}]}}]},
+                "array",
+            ),
+            ({"choices": [{"text": "completion"}]}, "completion"),
+            ({"output_text": "responses-shortcut"}, "responses-shortcut"),
+            (
+                {"output": [{"type": "message", "content": [{"type": "output_text", "text": "responses"}]}]},
+                "responses",
+            ),
+            ({"content": [{"type": "text", "text": "anthropic"}]}, "anthropic"),
+        ]
+        for body, expected in fixtures:
+            with self.subTest(body=body):
+                text, source, seen = lab.extract_json_response_text(body)
+                self.assertEqual(text, expected)
+                self.assertIsNotNone(source)
+                self.assertTrue(seen)
+
+    def test_sse_and_malformed_json_recovery_are_conservative(self) -> None:
+        text, count, seen, error_seen = lab.extract_sse_response_text(
+            'data: {"choices":[{"delta":{"content":"one"}}]}\n\n'
+            'data: {"type":"response.output_text.delta","delta":" two"}\n\n'
+            "data: [DONE]\n"
+        )
+        self.assertEqual(text, "one two")
+        self.assertEqual(count, 2)
+        self.assertTrue(seen)
+        self.assertFalse(error_seen)
+        self.assertEqual(
+            lab.extract_malformed_json_text(
+                '{"choices":[{"message":{"content":"recovered"}}] trailing'
+            ),
+            "recovered",
+        )
+        self.assertIsNone(
+            lab.extract_malformed_json_text('{"error":{"text":"do not accept"}')
+        )
+        self.assertIsNone(
+            lab.extract_malformed_json_text(
+                '{"request":{"messages":[{"content":"PROMPT_ECHO"}]},"choices":['
+            )
+        )
+        text, _count, seen, error_seen = lab.extract_sse_response_text(
+            'data: {"error":"rate limit"\n\ndata: [DONE]\n'
+        )
+        self.assertIsNone(text)
+        self.assertFalse(seen)
+        self.assertFalse(error_seen)
+        text, _count, seen, error_seen = lab.extract_sse_response_text(
+            'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+            'data: {"error":{"message":"upstream reset"}}\n\n'
+            'data: [DONE]\n'
+        )
+        self.assertEqual(text, "partial")
+        self.assertTrue(seen)
+        self.assertTrue(error_seen)
+        for error_event in (
+            'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+            'event: error\ndata: upstream reset\n\n',
+            'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+            'data: {"type":"error","message":"upstream reset"}\n\n',
+        ):
+            with self.subTest(error_event=error_event):
+                text, _count, seen, error_seen = lab.extract_sse_response_text(error_event)
+                self.assertEqual(text, "partial")
+                self.assertTrue(seen)
+                self.assertTrue(error_seen)
+
+    def test_provider_diagnostic_redacts_normalized_credential_keys(self) -> None:
+        sensitive_key = "api" + "-key"
+        fixture_value = "private-fixture-value"
+        diagnostic = lab.provider_diagnostic(
+            status=200,
+            content_type="application/json",
+            raw=json.dumps({sensitive_key: fixture_value, "message": "safe"}).encode(),
+            api_key=None,
+        )
+        serialized = json.dumps(diagnostic)
+        self.assertNotIn(fixture_value, serialized)
+        self.assertIn("<redacted>", serialized)
+
+    def test_run_one_turn_failure_does_not_commit_history_or_state(self) -> None:
+        case = {
+            "schemaVersion": "2.3",
+            "preset": base_preset(marker("chatHistory")),
+            "character": character(),
+            "greeting": False,
+            "userInput": "must-not-persist",
+            "model": "x",
+        }
+        failure = lab.ProviderResponseError(
+            "empty_provider_response",
+            "empty",
+            {
+                "httpStatus": 200,
+                "contentType": "application/json",
+                "responseBytes": 2,
+                "responseSha256": "x",
+                "preview": "{}",
+            },
+        )
+        with mock.patch.object(lab, "call_model", side_effect=failure):
+            result, next_state = lab.run_one_turn(
+                case,
+                Path.cwd(),
+                model_override=None,
+                base_url="http://127.0.0.1:1",
+                api_key=None,
+                timeout=2,
+                allow_insecure_http=False,
+                allow_unrendered_ejs=False,
+                state=None,
+                user_input_override=None,
+            )
+        self.assertEqual(result["status"], "provider-failed")
+        self.assertEqual(result["error"]["code"], "empty_provider_response")
+        self.assertFalse(result["stateCommitted"])
+        self.assertIsNone(next_state)
+
+    def test_batch_failure_does_not_append_failed_user_message(self) -> None:
+        initial_history = [{"role": "assistant", "content": "already committed"}]
+        case = {
+            "schemaVersion": "2.3",
+            "preset": base_preset(marker("chatHistory")),
+            "character": character(),
+            "greeting": False,
+            "history": initial_history,
+            "turns": [
+                {"userInput": "must-not-persist"},
+                {"userInput": "must-not-run"},
+            ],
+            "model": "x",
+        }
+        failure = lab.ProviderResponseError(
+            "empty_provider_response",
+            "empty",
+            {
+                "httpStatus": 200,
+                "contentType": "application/json",
+                "responseBytes": 2,
+                "responseSha256": "x",
+                "preview": "{}",
+            },
+        )
+        with mock.patch.object(lab, "call_model", side_effect=failure):
+            result = lab.run_session(
+                case,
+                Path.cwd(),
+                model_override=None,
+                base_url="http://127.0.0.1:1",
+                api_key=None,
+                timeout=2,
+                allow_insecure_http=False,
+                allow_unrendered_ejs=False,
+            )
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error"]["code"], "empty_provider_response")
+        self.assertEqual(result["finalHistory"], initial_history)
+
+    def test_run_one_turn_commits_exactly_one_turn_for_agent_review(self) -> None:
+        case = {
+            "schemaVersion": "2.3",
+            "preset": base_preset(marker("chatHistory")),
+            "character": character(),
+            "greeting": False,
+            "userInput": "first",
+            "model": "x",
+        }
+        replies = iter(("reply-one", "reply-two"))
+
+        def fake_call(*_args: object, **_kwargs: object) -> tuple[dict, str, str, dict]:
+            reply = next(replies)
+            return (
+                {"choices": [{"message": {"content": reply}}]},
+                reply,
+                "HTTP 200",
+                {
+                    "source": "choices[0].message.content",
+                    "contentType": "application/json",
+                    "responseBytes": len(reply),
+                    "warnings": [],
+                },
+            )
+
+        with mock.patch.object(lab, "call_model", side_effect=fake_call):
+            first, state = lab.run_one_turn(
+                case,
+                Path.cwd(),
+                model_override=None,
+                base_url="http://127.0.0.1:1",
+                api_key=None,
+                timeout=2,
+                allow_insecure_http=False,
+                allow_unrendered_ejs=False,
+                state=None,
+                user_input_override=None,
+            )
+            self.assertIsNotNone(state)
+            assert state is not None
+            second, next_state = lab.run_one_turn(
+                case,
+                Path.cwd(),
+                model_override=None,
+                base_url="http://127.0.0.1:1",
+                api_key=None,
+                timeout=2,
+                allow_insecure_http=False,
+                allow_unrendered_ejs=False,
+                state=state,
+                user_input_override="second",
+            )
+        self.assertEqual(first["turnIndex"], 1)
+        self.assertEqual(second["turnIndex"], 2)
+        self.assertIsNotNone(next_state)
+        self.assertIn("reply-one", json.dumps(second["request"]))
+        self.assertIn("second", json.dumps(second["request"]))
+
+    def test_continued_run_turn_requires_explicit_next_input(self) -> None:
+        case = {
+            "schemaVersion": "2.3",
+            "preset": base_preset(marker("chatHistory")),
+            "character": character(),
+            "greeting": False,
+            "userInput": "first",
+            "model": "x",
+        }
+        state = lab.make_turn_state(
+            case_fingerprint=lab.resolved_case_fingerprint(case, Path.cwd()),
+            turn_index=1,
+            history=[
+                {"role": "user", "content": "first"},
+                {"role": "assistant", "content": "reply"},
+            ],
+            ejs_variables={"chat": {}, "global": {}},
+            budget_limit=lab.MAX_SESSION_BUDGET_BYTES,
+            budget_used=10,
+        )
+        with self.assertRaises(lab.LabError) as raised:
+            lab.run_one_turn(
+                case,
+                Path.cwd(),
+                model_override=None,
+                base_url="http://127.0.0.1:1",
+                api_key=None,
+                timeout=2,
+                allow_insecure_http=False,
+                allow_unrendered_ejs=False,
+                state=state,
+                user_input_override=None,
+            )
+        self.assertEqual(raised.exception.code, "missing_turn_input")
+
+    def test_run_turn_cli_writes_private_credential_free_state(self) -> None:
+        with tempfile.TemporaryDirectory() as working:
+            root = Path(working)
+            case_path = root / "case.json"
+            case_path.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": "2.3",
+                        "preset": base_preset(marker("chatHistory")),
+                        "character": character(),
+                        "greeting": False,
+                        "userInput": "first",
+                        "model": "x",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state_out = root / "state-1.json"
+            result_out = root / "result.json"
+            fake = (
+                {"choices": [{"message": {"content": "safe reply"}}]},
+                "safe reply",
+                "HTTP 200",
+                {
+                    "source": "choices[0].message.content",
+                    "contentType": "application/json",
+                    "responseBytes": 10,
+                    "warnings": [],
+                },
+            )
+            with mock.patch.object(lab, "call_model", return_value=fake):
+                code = lab.main(
+                    [
+                        "run-turn",
+                        "--case",
+                        str(case_path),
+                        "--base-url",
+                        "http://127.0.0.1:1",
+                        "--no-auth",
+                        "--state-out",
+                        str(state_out),
+                        "--output",
+                        str(result_out),
+                    ]
+                )
+            self.assertEqual(code, 0)
+            self.assertEqual(stat.S_IMODE(state_out.stat().st_mode), 0o600)
+            state = json.loads(state_out.read_text())
+            serialized = json.dumps(state).lower()
+            self.assertNotIn("api_key", serialized)
+            self.assertNotIn("authorization", serialized)
+            self.assertNotIn("baseurl", serialized)
+            self.assertEqual(state["turnIndex"], 1)
+
+    def test_run_turn_cli_failure_writes_no_state_file(self) -> None:
+        with tempfile.TemporaryDirectory() as working:
+            root = Path(working)
+            case_path = root / "case.json"
+            case_path.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": "2.3",
+                        "preset": base_preset(marker("chatHistory")),
+                        "character": character(),
+                        "greeting": False,
+                        "userInput": "must-not-persist",
+                        "model": "x",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state_out = root / "failed.state.json"
+            result_out = root / "failed.result.json"
+            failure = lab.ProviderResponseError(
+                "empty_provider_response",
+                "empty",
+                {
+                    "httpStatus": 200,
+                    "contentType": "application/json",
+                    "responseBytes": 2,
+                    "responseSha256": "x",
+                    "preview": "{}",
+                },
+            )
+            with mock.patch.object(lab, "call_model", side_effect=failure):
+                code = lab.main(
+                    [
+                        "run-turn",
+                        "--case",
+                        str(case_path),
+                        "--base-url",
+                        "http://127.0.0.1:1",
+                        "--no-auth",
+                        "--state-out",
+                        str(state_out),
+                        "--output",
+                        str(result_out),
+                    ]
+                )
+            self.assertEqual(code, 2)
+            self.assertFalse(state_out.exists())
+            result = json.loads(result_out.read_text())
+            self.assertFalse(result["stateCommitted"])
+            self.assertEqual(result["error"]["code"], "empty_provider_response")
+
+    def test_state_input_requires_mode_0600(self) -> None:
+        with tempfile.TemporaryDirectory() as working:
+            path = Path(working) / "state.json"
+            path.write_text("{}", encoding="utf-8")
+            path.chmod(0o644)
+            with self.assertRaises(lab.LabError) as raised:
+                lab.load_turn_state(path, "fingerprint")
+            self.assertEqual(raised.exception.code, "insecure_private_file")
+
+    def test_state_input_rejects_extra_credential_like_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as working:
+            path = Path(working) / "state.json"
+            path.write_text(
+                json.dumps({"api" + "-key": "must-not-be-ignored"}),
+                encoding="utf-8",
+            )
+            path.chmod(0o600)
+            with self.assertRaises(lab.LabError) as raised:
+                lab.load_turn_state(path, "fingerprint")
+            self.assertEqual(raised.exception.code, "state_contains_sensitive_field")
 
 
 class PromptLabCliTests(unittest.TestCase):
@@ -859,6 +1742,115 @@ class PromptLabCliTests(unittest.TestCase):
         self.assertEqual(lab.main(["compile", "--case", str(self.case_path), "--output", str(output)]), 0)
         self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
         self.assertEqual(json.loads(output.read_text())["mode"], "compile")
+
+    def test_http_200_response_adapter_distinguishes_empty_tool_and_unsupported(self) -> None:
+        fixtures = [
+            (b"", "application/json", "empty_provider_response"),
+            (
+                b'{"choices":[{"message":{"content":""}}]}',
+                "application/json",
+                "empty_provider_response",
+            ),
+            (
+                b'{"choices":[{"message":{"tool_calls":[{"id":"1"}],"content":null}}]}',
+                "application/json",
+                "tool_call_only_response",
+            ),
+            (b'{"unexpected":true}', "application/json", "unsupported_provider_response_shape"),
+            (
+                b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+                b'data: {"error":{"message":"upstream reset"}}\n\n',
+                "text/event-stream",
+                "provider_error_body",
+            ),
+            (
+                b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+                b'event: error\ndata: upstream reset\n\n',
+                "text/event-stream",
+                "provider_error_body",
+            ),
+            (b"<html>gateway error</html>", "text/html", "provider_error_document"),
+        ]
+
+        for payload, content_type, expected in fixtures:
+            class ResponseHandler(BaseHTTPRequestHandler):
+                def do_POST(self) -> None:  # noqa: N802
+                    self.send_response(200)
+                    self.send_header("Content-Type", content_type)
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+
+                def log_message(self, _format: str, *_args: object) -> None:
+                    return
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), ResponseHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                with self.subTest(expected=expected), self.assertRaises(lab.ProviderResponseError) as raised:
+                    lab.call_model(
+                        {"model": "x", "messages": [], "stream": False},
+                        base_url=f"http://127.0.0.1:{server.server_address[1]}",
+                        api_key=None,
+                        timeout=2,
+                        allow_insecure_http=False,
+                    )
+                self.assertEqual(raised.exception.code, expected)
+                self.assertEqual(raised.exception.diagnostic["httpStatus"], 200)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+    def test_http_200_adapter_accepts_plain_sse_and_malformed_explicit_text(self) -> None:
+        fixtures = [
+            (b"plain reply", "text/plain", "plain reply", "text/plain", False),
+            (
+                b'data: {"choices":[{"delta":{"content":"stream"}}]}\n\ndata: [DONE]\n',
+                "text/event-stream",
+                "stream",
+                "sse.data",
+                False,
+            ),
+            (
+                b'{"choices":[{"message":{"content":"recovered"}}] trailing',
+                "application/json",
+                "recovered",
+                "malformed-json-explicit-text-field",
+                True,
+            ),
+        ]
+        for payload, content_type, expected_text, expected_source, warned in fixtures:
+            class ResponseHandler(BaseHTTPRequestHandler):
+                def do_POST(self) -> None:  # noqa: N802
+                    self.send_response(200)
+                    self.send_header("Content-Type", content_type)
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+
+                def log_message(self, _format: str, *_args: object) -> None:
+                    return
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), ResponseHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                _body, text, _status, extraction = lab.call_model(
+                    {"model": "x", "messages": [], "stream": False},
+                    base_url=f"http://127.0.0.1:{server.server_address[1]}",
+                    api_key=None,
+                    timeout=2,
+                    allow_insecure_http=False,
+                )
+                self.assertEqual(text, expected_text)
+                self.assertEqual(extraction["source"], expected_source)
+                self.assertEqual(bool(extraction["warnings"]), warned)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
 
     def test_output_cannot_overwrite_case_or_api_key_file(self) -> None:
         stderr = io.StringIO()
@@ -949,6 +1941,73 @@ class PromptLabCliTests(unittest.TestCase):
         self.assertIn("RUN Mira", captured_text)
         self.assertNotIn("<%", captured_text)
         self.assertEqual(result["ejs"]["variables"]["final"]["chat"]["run"], 1)
+
+    def test_run_multiturn_calls_provider_sequentially_and_carries_real_reply(self) -> None:
+        self.case.pop("userInput")
+        self.case["preset"] = base_preset(
+            {
+                "identifier": "session-counter",
+                "content": '<% incvar("sessionTurn") %>SESSION=<%- getvar("sessionTurn") %>',
+                "role": "system",
+                "type": "custom",
+                "injectionPosition": "relative",
+                "enabled": True,
+                "active": True,
+            },
+            marker("chatHistory"),
+        )
+        self.case["turns"] = [
+            {"label": "first", "userInput": "first-user-message"},
+            {"label": "second", "userInput": "second-user-message"},
+        ]
+        self.case_path.write_text(json.dumps(self.case), encoding="utf-8")
+        config = provider.VirtualProviderConfig(
+            capture_dir=self.root / "session-captures",
+            client_key=CLIENT_KEY,
+            model="tavo-virtual-test",
+            allowed_clients=provider.validate_allowed_clients(["127.0.0.1"]),
+        )
+        server = provider.VirtualProviderServer(("127.0.0.1", 0), config)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        output = self.root / "session-run.json"
+        old_key = os.environ.get(lab.DEFAULT_KEY_ENV)
+        os.environ[lab.DEFAULT_KEY_ENV] = CLIENT_KEY
+        try:
+            code = lab.main(
+                [
+                    "run",
+                    "--case",
+                    str(self.case_path),
+                    "--base-url",
+                    f"http://127.0.0.1:{server.server_address[1]}",
+                    "--output",
+                    str(output),
+                ]
+            )
+        finally:
+            if old_key is None:
+                os.environ.pop(lab.DEFAULT_KEY_ENV, None)
+            else:
+                os.environ[lab.DEFAULT_KEY_ENV] = old_key
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        self.assertEqual(code, 0)
+        result = json.loads(output.read_text())
+        self.assertEqual(result["mode"], "run-session")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["session"]["completedTurns"], 2)
+        self.assertEqual(result["finalEjsVariables"]["chat"]["sessionTurn"], 2)
+        first_reply = result["turns"][0]["responseText"]
+        second_request = json.dumps(result["turns"][1]["request"], ensure_ascii=False)
+        self.assertIn("first-user-message", second_request)
+        self.assertIn(first_reply, second_request)
+        self.assertIn("second-user-message", second_request)
+        self.assertIn("SESSION=2", second_request)
+        captures = list((self.root / "session-captures").glob("*.json"))
+        self.assertEqual(len(captures), 2)
 
     def test_run_refuses_unrendered_ejs_before_network(self) -> None:
         self.case["ejs"] = {"mode": "off"}
@@ -1078,8 +2137,9 @@ class PromptLabCliTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
         self.assertEqual(raised.exception.code, "provider_http_error")
-        self.assertNotIn(CLIENT_KEY, str(raised.exception))
-        self.assertIn("<redacted>", str(raised.exception))
+        diagnostic_text = json.dumps(lab.error_payload(raised.exception))
+        self.assertNotIn(CLIENT_KEY, diagnostic_text)
+        self.assertIn("omitted", diagnostic_text)
 
     def test_provider_response_redacts_sensitive_values_and_keys(self) -> None:
         value = {

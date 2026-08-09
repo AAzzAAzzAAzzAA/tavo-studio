@@ -1,7 +1,7 @@
 {
   "schemaVersion": "2.3",
   "preset": {
-    "name": "Prompt Lab minimal preset",
+    "name": "Prompt Lab multi-turn preset",
     "basicPrompts": {
       "persona": "{{persona}}",
       "description": "{{description}}",
@@ -13,36 +13,14 @@
     },
     "entries": [
       {
-        "identifier": "main",
-        "name": "Main Prompt",
-        "content": "Write the next reply as {{char}} while respecting the supplied character and world information.",
-        "role": "system",
-        "type": "builtin",
-        "injectionPosition": "relative",
-        "injectionDepth": 4,
-        "forbidOverrides": true,
-        "enabled": true,
-        "active": true
-      },
-      {
-        "identifier": "lab-ejs-mode",
-        "name": "Prompt Lab EJS Mode",
-        "content": "<% const mode = getvar(\"lab_mode\", \"text\"); setvar(\"lab_mode\", mode); %><% if (mode === \"text\") { %>Evaluate the behavior caused by the assembled prompt text.<% } %>",
+        "identifier": "session-main",
+        "name": "Session main",
+        "content": "<% incvar(\"prompt_lab.turn\") %>[PROMPT_LAB_TURN]=<%- getvar(\"prompt_lab.turn\") %>\nWrite the next reply as {{char}} and preserve continuity with the visible conversation history.",
         "role": "system",
         "type": "custom",
         "injectionPosition": "relative",
-        "injectionDepth": 4,
-        "enabled": true,
-        "active": true
-      },
-      {
-        "identifier": "worldInfoBefore",
-        "name": "Lorebook Before",
-        "content": "",
-        "role": "system",
-        "type": "marker",
-        "injectionPosition": "relative",
-        "injectionDepth": 4,
+        "injectionDepth": 0,
+        "forbidOverrides": true,
         "enabled": true,
         "active": true
       },
@@ -60,17 +38,6 @@
       {
         "identifier": "charDescription",
         "name": "Character Description",
-        "content": "",
-        "role": "system",
-        "type": "marker",
-        "injectionPosition": "relative",
-        "injectionDepth": 4,
-        "enabled": true,
-        "active": true
-      },
-      {
-        "identifier": "charPersonality",
-        "name": "Character Personality",
         "content": "",
         "role": "system",
         "type": "marker",
@@ -102,17 +69,6 @@
         "active": true
       },
       {
-        "identifier": "dialogueExamples",
-        "name": "Dialogue Examples",
-        "content": "",
-        "role": "system",
-        "type": "marker",
-        "injectionPosition": "relative",
-        "injectionDepth": 4,
-        "enabled": true,
-        "active": true
-      },
-      {
         "identifier": "chatHistory",
         "name": "Chat History",
         "content": "",
@@ -129,30 +85,30 @@
     "spec": "chara_card_v2",
     "spec_version": "2.0",
     "data": {
-      "name": "Example Character",
-      "description": "{{char}} is a careful guide.",
-      "personality": "Observant and concise.",
-      "scenario": "{{char}} and {{user}} are exploring an old observatory.",
-      "first_mes": "The observatory door is open. What should we inspect first?",
+      "name": "Session Guide",
+      "description": "<% incvar(\"prompt_lab.card_turn\") %>[CARD_TURN]=<%- getvar(\"prompt_lab.card_turn\") %>\n{{char}} is a concise continuity tester.",
+      "personality": "Observant and consistent.",
+      "scenario": "[LAST_USER_CURRENT]=<%- lastUserMessage.includes(\"SESSION_TURN\") ? \"YES\" : \"NO\" %>\n[LAST_ASSISTANT_PRESENT]=<%- lastCharMessage.length > 0 ? \"YES\" : \"NO\" %>",
+      "first_mes": "The multi-turn test is ready.",
       "alternate_greetings": [],
-      "mes_example": "<START>\n{{user}}: What do you notice?\n{{char}}: Fresh footprints beside the telescope."
+      "mes_example": ""
     }
   },
   "persona": {
     "name": "User",
-    "description": "A curious visitor who checks evidence before drawing conclusions."
+    "description": "A tester checking prompt continuity across multiple model requests."
   },
   "worldbooks": [
     {
-      "name": "Observatory facts",
+      "name": "Session keyword window",
       "entries": [
         {
-          "identifier": "brass-key",
-          "name": "Brass key",
-          "content": "A brass key marked 17 opens the telescope cabinet.",
+          "identifier": "session-keyword",
+          "name": "Session keyword",
+          "content": "[SESSION_KEYWORD_VISIBLE]=YES",
           "enabled": true,
           "strategy": "keyword",
-          "keywords": ["brass key", "telescope cabinet"],
+          "keywords": ["session-keyword"],
           "secondaryKeywords": [],
           "secondaryKeywordStrategy": "none",
           "scanDepth": 2,
@@ -171,13 +127,28 @@
   ],
   "history": [],
   "greeting": "first",
-  "userInput": "I found a brass key. What does it open?",
+  "turns": [
+    {
+      "label": "keyword trigger",
+      "userInput": "SESSION_TURN_1 session-keyword: begin the test.",
+      "assistantResponse": "Offline compile placeholder for the first assistant reply."
+    },
+    {
+      "label": "history carry",
+      "userInput": "SESSION_TURN_2: continue from the previous reply.",
+      "assistantResponse": "Offline compile placeholder for the second assistant reply."
+    },
+    {
+      "label": "keyword expiry",
+      "userInput": "SESSION_TURN_3: finish the continuity check."
+    }
+  ],
   "seed": 0,
   "sessionBudgetBytes": 67108864,
   "ejs": {
     "mode": "sandboxed",
     "timeoutMs": 500,
-    "characterId": "example-character",
+    "characterId": "session-guide",
     "variables": {
       "chat": {},
       "global": {}
@@ -188,8 +159,8 @@
     "id": "replace-with-model-id",
     "baseUrl": "https://replace-with-provider.example/v1",
     "parameters": {
-      "temperature": 0.7,
-      "max_tokens": 800
+      "temperature": 0.2,
+      "max_tokens": 400
     }
   }
 }

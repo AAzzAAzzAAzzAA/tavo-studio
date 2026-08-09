@@ -1,136 +1,119 @@
 # App Settings And Data
 
-This reference covers app-level settings, provider configuration, backup, storage, theme, and data management.
+This reference covers provider configuration, model settings, Agent Loop controls, privacy, themes, backup/restore, storage, and workflow settings.
 
-Current evidence snapshot: complete official crawl `assets/official-docs/text-20260726/`, Tavo `1.0.0` strict gate `assets/evidence/1.0.0/20260807-gate.json`, and incremental Agent Loop/MCP summary `assets/evidence/1.0.0/20260807-agent-loop-mcp-live-matrix.json`. Use the 0.93 zero-real matrix only for app settings not rerun on 1.0.
+## API And Model Configuration
 
-## Official Pages
+Tavo supports provider connections for OpenAI, Claude, Gemini, DeepSeek, OpenRouter, Doubao/Volcano/ByteDance, Volink, and custom OpenAI-compatible protocols.
 
-- `https://docs.tavoai.dev/cn/guides/api-setting/`
-- `https://docs.tavoai.dev/cn/guides/api-setting/api-setting-1/`
-- `https://docs.tavoai.dev/cn/guides/api-setting/select-model/`
-- provider key pages under `guides/api-setting/get-key/`
-- `https://docs.tavoai.dev/cn/guides/theme/`
-- `https://docs.tavoai.dev/cn/guides/others/backup/`
-- `https://docs.tavoai.dev/cn/guides/others/storage-space/`
-- `https://docs.tavoai.dev/cn/guides/others/customize-keyboard/`
-- `https://docs.tavoai.dev/cn/guides/others/quickly-group-chat/`
-- `https://docs.tavoai.dev/cn/privacy-policy/`
+Configuration behavior:
 
-## Official-Current API And Model Surface
+- Use one-click provider setup where available, or manually create a connection, select platform/model, enter provider values, and save.
+- A custom OpenAI-compatible base URL may end at `/v1`; do not normally include `/chat/completions` in the base URL.
+- Third-party compatibility is not guaranteed merely because an endpoint claims OpenAI compatibility.
+- Prompt-format conversion can merge adjacent same-role messages or adapt providers that restrict system/user message shapes.
+- Global model settings include context length, reply-token limit, temperature, Top-P, Top-K, and streaming.
+- Connection-level parameters usually override global model settings.
+- Provider configuration is a native UI responsibility unless a current runtime API explicitly exposes a safe write operation.
 
-The current official docs include:
+Tavo v0.93 includes dedicated Fable 5 and Mythos 5 parameter controls. Their UI fields can be configured, but proprietary wire fields and real endpoint behavior must be confirmed with the chosen provider before making compatibility claims.
 
-- general API setup;
-- API settings;
-- model selection;
-- provider key pages for OpenAI, Claude, Gemini, DeepSeek, OpenRouter, Doubao/Volcano/ByteDance, Volink, and custom OpenAI-compatible protocol;
-- common API error troubleshooting.
+## Tavo 1.0 Agent Loop Settings
 
-Treat UI configuration as official. Treat programmatic editing of provider connections as `needs-mcp` or UI-only until current runtime tools prove otherwise.
+Advanced Rendering settings include three global tool controls:
 
-Official-current configuration notes:
+- **启用工具**: enables native in-chat model tool calling; default is off.
+- **动态加载工具**: starts with discovery/user-dialog/web tools so the model can find additional Tavo tools without placing the full catalog in initial context; default is on after tools are enabled.
+- **显示工具调用**: shows tool-call traces or cards in the conversation.
 
-- novice flow can use one-click provider setup where offered;
-- manual flow creates an API connection, selects platform/model, fills provider config, and saves;
-- custom OpenAI-compatible endpoints may need `/v1` as base URL, but should not be filled down to `/chat/completions`;
-- compatibility is not guaranteed for every third-party endpoint;
-- prompt-format converters include options for merging adjacent same-role messages and handling providers that restrict system/user message shape;
-- global model settings include context memory length, reply token limit, temperature, Top-P, Top-K, and streaming;
-- API-connection-level parameters usually override global model settings.
+Turning dynamic loading off exposes the full built-in catalog directly; turning it back on restores discovery-first behavior. These are global Tavo settings, not rolecard, preset, worldbook, or plugin fields.
 
-The 0.93 Android UI exposed dedicated Fable 5 and Mythos 5 parameter controls. Sentinel values survived save, reopen, and app restart. No safely redirected proprietary request reached the local fixture, so field persistence is `ui-pass` while wire shape and real endpoint behavior remain blocked.
+Boundaries:
 
-## Tavo 1.0 Tool Settings
+- The Agent Loop is available only when the selected provider/model can return compatible tool calls.
+- The tool catalog belongs to Tavo; a rolecard or plugin cannot register new Agent Loop tools.
+- Dynamic loading changes tool visibility and context cost, not the card's prose content.
+- External MCP and the in-chat Agent Loop are separate capabilities.
+- A model may choose not to call a tool even when it is available; prompt design should explain when and why a tool is appropriate.
 
-Advanced Rendering settings expose three global controls:
+## Local Data And Privacy
 
-- **启用工具**: turns native model tool calling on; runtime docs declare the default off;
-- **动态加载工具**: when on, initial requests use discovery to reduce context; runtime docs declare the default on after tool use is enabled;
-- **显示工具调用**: shows tool-call traces/cards in the conversation.
+Tavo uses local-first storage for chat history, personalized settings, API keys, user-created characters, and other app configuration.
 
-Live provider captures proved the mode change: dynamic mode exposed exactly search/user-dialog/web on the initial round, while direct mode exposed 59 callable tools and no search tool. Re-enabling dynamic loading restored the three-tool initial surface. These switches are app-global tool-delivery settings, not rolecard fields. Read `references/28-tavo-100-live-evidence.md` for counts, ownership, limits, and evidence boundaries.
+When a user invokes a third-party AI provider, relevant chat content and provider credentials are transmitted to that provider over HTTPS and are governed by the provider's terms and privacy policy. “Stored locally” must not be restated as “never leaves the device.”
 
-## Local Data And Privacy Boundary
+Security rules:
 
-Official-current privacy docs describe Tavo as using local-first storage for:
-
-- chat history;
-- personalized settings and preferences;
-- API key information;
-- user-created character data;
-- other app-related configuration.
-
-The same docs say chat content and API keys are transmitted to third-party AI providers only when the user uses those provider services, through HTTPS, and then fall under the provider's own terms and privacy policy. For skill answers, this means "stored locally by Tavo" is official-current, while "never leaves the device" is too broad once a provider call is made.
+- Never copy provider keys into cards, presets, plugins, logs, screenshots, or community fixtures.
+- Ask users to enter secrets directly in Tavo.
+- Treat backup files as sensitive because they may contain credentials.
+- Use revocable, least-privilege test keys only when a real provider test is explicitly authorized.
 
 ## Theme
 
-Official-current theme docs say users can open theme management from the left side menu and:
+Theme management supports applying an included theme or a user-created theme, copying a built-in theme as a template, and customizing:
 
-- apply an official default theme or a self-made theme;
-- copy an official theme as a template and modify the copy;
-- customize chat background, status bar, message bubble style, font, character avatar display, and functional elements such as inner-monologue hint style.
+- chat background;
+- status bar;
+- message bubble styles;
+- fonts;
+- character-avatar presentation;
+- functional elements such as inner-monologue hints.
 
-Treat theme editing as a real app capability. Treat theme export/import format, CSS-like expressiveness, and MCP visibility as `needs-live-verify`.
-
-The current official theme page does not enumerate every concrete font or layout control, and the 0.93 MCP surface exposes no theme tool/schema. The 0.93 UI matrix copied a theme, selected a visibly non-default font, and proved save/reopen/app-restart persistence before restoring the original theme. The italic-whitespace repair also preserved one space after `*foo*` and `_foo_` through persistence, UI, reopen, and restart. Treat these as scoped `ui-pass`, not theme-format or blanket Markdown proof.
+Theme editing is a native capability. Do not assume theme files expose unrestricted CSS or that themes are controllable through TavoJS/external MCP. Check export/import shape and visual persistence in the target version before distributing a theme package.
 
 ## Backup And Restore
 
-Official-current backup docs say Tavo can back up core data and restore from backup files. They also say backup may include API keys if selected.
+Tavo can back up core data and restore from backup files. A backup may include API keys if the user selects that option.
 
-Important boundaries:
+Boundaries:
 
-- Backup files are sensitive because they can include API keys.
-- Backups from a higher app version may not restore into lower versions.
-- Before destructive testing, create a backup and record app version.
-- Restore strategy, overwrite/merge behavior, and backup file schema need live verification before any automated restore work.
+- Backups from a newer app version may not restore into an older version.
+- Restore can restart the app; process continuity is not a correctness condition.
+- Merge/overwrite behavior and coverage of every data family should be confirmed before automated restore.
+- Do not inspect, log, commit, or embed backup contents.
 
-For the 0.93 zero-real restore case, use two distinct files:
+Use a two-backup method for destructive validation:
 
-- Backup A: full pre-test rollback before any write. Store in a permission-restricted directory and record only size/SHA-256 in ordinary evidence.
-- Backup B: created after installing/enabling the unique backup fixture and saving its config marker; use it to test uninstall -> restore -> exact plugin/config/enabled/runtime-contribution readback.
+1. **Rollback backup**: create before any test write and keep permission-restricted.
+2. **Scenario backup**: create after preparing one disposable object and its known settings; use it to test mutation/removal followed by restore.
 
-Backup B restoration is a high-risk, late-stage case. Run only after lower-risk plugin tests pass. On any restore anomaly, stop writes and use Backup A for rollback. Neither backup contents nor provider secrets may be inspected, logged, committed, or embedded in reusable Skill assets.
-
-The 0.93 run created native Backup A and Backup B without opening or parsing either file. A separate discriminating spec-2 drill changed a plugin config and enabled state, observed active runtime contributions, restored Backup B, and matched the saved config, disabled state, and zero contributions exactly. Tavo may legitimately restart during native restore, so PID continuity is not an acceptance condition for that phase. This is a bounded `roundtrip-pass`, not a claim about downgrade restore or every data class.
+After restore, compare the disposable object's fields, enabled state, settings, and runtime contributions. If anything unexpected appears, stop further writes and use the rollback backup.
 
 ## Storage Space
 
-Official-current storage docs say the storage page shows used space and safe cleanup categories such as:
+The storage page reports used space and can clean categories such as:
 
-- cache, including TTS voice cache;
-- logs, including context/load-balancer logs;
-- role/character-related assets such as avatars and images.
+- cache, including TTS audio cache;
+- logs, including context and load-balancer logs;
+- character-related assets such as avatars and images.
 
-Docs explicitly distinguish core "data" from cleanup categories; chat records, characters, worldbooks, and similar core data should not be assumed removable through storage cleanup.
+Core records such as chats, characters, and worldbooks should not be assumed removable through cache cleanup. Storage cleanup is not a factory reset or data-reset tool.
 
 ## Shortcuts And Quick Group Speech
 
-Official docs include custom shortcuts and quick group chat speech. These belong to app workflow configuration and should be summarized in later UI-focused expansion. Treat exact UI paths and exportability as `needs-live-verify`.
+Tavo supports custom keyboard shortcuts and quick group speech controls. Quick group speech adds member-avatar response controls near the group-chat composer. Exact shortcut export/import and programmatic visibility can vary by version.
 
-## Prior 0.93 Live Boundaries
+## Validation Method
 
-- Custom model/provider request work used a deterministic local service with `realModelRequestsSent=0`, `realProviderCredentialsUsed=false`, and `countsTowardKpi=false`.
-- Protected chat payload, input, primary API, preset, persona, theme, permissions, original plugin hashes, and original enabled states matched the pre-write anchor after restoration.
-- Retained test plugins finished disabled; the local provider stopped.
-- The sole retained test image-provider configuration remained shown as the image current item because 0.93 exposes edit/copy/delete but no unset action. Deleting it would contradict the retention policy; the primary chat API was restored.
-- iOS behavior is `not-applicable` to this Android run and cannot be promoted.
+### Providers and models
 
-## Historical-Derived Guidance
+1. Confirm base URL, protocol, model ID, and parameter precedence with a harmless minimal request.
+2. Test text, reasoning, image, function/tool, and structured-output capabilities separately; provider flags alone are insufficient.
+3. Test streaming and non-streaming paths if both matter.
+4. Record only redacted configuration and non-secret errors.
 
-- API provider settings are high-secrecy; do not screenshot or persist full keys.
-- Provider/model capability flags are not enough; image, reasoning, function, and structured-output support should be tested against the selected endpoint.
-- Backup and restore tests should always record app version and rollback path.
-- Storage cleanup is not a data reset tool.
+### Agent Loop
 
-## Verification Targets
+1. Use an isolated chat and a model known to support tool calls.
+2. Enable tools and compare dynamic-loading and full-catalog modes with the same prompt.
+3. Ask for one harmless read operation before testing any mutation.
+4. Check tool-call visibility, model follow-up behavior, and whether the final answer uses the tool result.
+5. Do not modify the supplied preset/card/worldbook just to make a tool call occur.
 
-- Current provider list and model fields.
-- Complete Custom OpenAI/Responses/legacy protocol and fault behavior beyond the completed local paths.
-- Backup artifact format and secret handling.
-- Backup restoration across every data family and version boundary.
-- Fable/Mythos proprietary wire fields and real endpoint behavior.
-- Disposable NovelAI form save/reopen/delete without a real key or provider call.
-- Storage cleanup categories and preserved data.
-- Shortcut export/import or MCP visibility.
+### Themes, backup, and storage
+
+1. Copy a theme rather than editing an irreplaceable original; check save, reopen, restart, and rollback.
+2. Create the rollback backup before any restore experiment.
+3. Use one disposable object to distinguish merge, overwrite, and restore behavior.
+4. Measure storage categories before and after cleaning, then confirm core chats/cards/worldbooks remain intact.

@@ -1,11 +1,11 @@
 {
-  "name": "Codex Fixture Worldbook",
+  "name": "Community Fixture Worldbook",
   "description": "A minimal worldbook fixture with one trigger and one constant entry.",
   "entries": [
     {
-      "keys": ["codex-fixture-trigger"],
+      "keys": ["community-fixture-trigger"],
       "comment": "triggered fact",
-      "content": "The phrase codex-fixture-trigger should inject this validation fact.",
+      "content": "The phrase community-fixture-trigger should inject this validation fact.",
       "enabled": true,
       "constant": false,
       "selective": true,

@@ -1,5 +1,5 @@
 tavo.plugin.on("chat:opened", async (event) => {
-  console.log("Codex hook-only chat marker", event.chatId);
+  console.log("Community hook-only chat marker", event.chatId);
 });
 
 tavo.plugin.on("input:beforeSend", async (event) => {

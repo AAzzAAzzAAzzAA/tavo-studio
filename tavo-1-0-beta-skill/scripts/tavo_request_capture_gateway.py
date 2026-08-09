@@ -439,54 +439,57 @@ class CaptureGatewayHandler(BaseHTTPRequestHandler):
             with upstream_opener().open(request, timeout=self.server.config.timeout_seconds) as response:
                 self._relay_upstream(response, record, capture_path, started)
         except urllib.error.HTTPError as exc:
-            if 300 <= exc.code < 400:
-                body = json.dumps(
-                    {"error": {"message": "Upstream redirect was blocked", "type": "upstream_redirect_error"}},
-                    separators=(",", ":"),
-                ).encode()
-                record["upstreamResponseStatus"] = exc.code
+            try:
+                if 300 <= exc.code < 400:
+                    body = json.dumps(
+                        {"error": {"message": "Upstream redirect was blocked", "type": "upstream_redirect_error"}},
+                        separators=(",", ":"),
+                    ).encode()
+                    record["upstreamResponseStatus"] = exc.code
+                    self._finish_record(
+                        record,
+                        capture_path,
+                        started,
+                        "upstream-redirect-blocked",
+                        HTTPStatus.BAD_GATEWAY,
+                        "application/json",
+                        body,
+                        append_index=False,
+                    )
+                    try:
+                        self._relay_buffered_error(HTTPStatus.BAD_GATEWAY, "application/json", body, {})
+                    except ClientDisconnected:
+                        self._mark_client_disconnected(record, capture_path)
+                    finally:
+                        self._append_record_index(record, capture_path)
+                    return
+                body = exc.read(MAX_UPSTREAM_ERROR_BYTES + 1)
+                status = exc.code
+                status_name = "upstream-http-error"
+                content_type = exc.headers.get("Content-Type", "application/json")
+                if len(body) > MAX_UPSTREAM_ERROR_BYTES:
+                    status = HTTPStatus.BAD_GATEWAY
+                    status_name = "upstream-error-too-large"
+                    content_type = "application/json"
+                    body = b'{"error":{"message":"Upstream error body exceeded the gateway limit"}}'
                 self._finish_record(
                     record,
                     capture_path,
                     started,
-                    "upstream-redirect-blocked",
-                    HTTPStatus.BAD_GATEWAY,
-                    "application/json",
+                    status_name,
+                    status,
+                    content_type,
                     body,
                     append_index=False,
                 )
                 try:
-                    self._relay_buffered_error(HTTPStatus.BAD_GATEWAY, "application/json", body, {})
+                    self._relay_buffered_error(status, content_type, body, exc.headers)
                 except ClientDisconnected:
                     self._mark_client_disconnected(record, capture_path)
                 finally:
                     self._append_record_index(record, capture_path)
-                return
-            body = exc.read(MAX_UPSTREAM_ERROR_BYTES + 1)
-            status = exc.code
-            status_name = "upstream-http-error"
-            content_type = exc.headers.get("Content-Type", "application/json")
-            if len(body) > MAX_UPSTREAM_ERROR_BYTES:
-                status = HTTPStatus.BAD_GATEWAY
-                status_name = "upstream-error-too-large"
-                content_type = "application/json"
-                body = b'{"error":{"message":"Upstream error body exceeded the gateway limit"}}'
-            self._finish_record(
-                record,
-                capture_path,
-                started,
-                status_name,
-                status,
-                content_type,
-                body,
-                append_index=False,
-            )
-            try:
-                self._relay_buffered_error(status, content_type, body, exc.headers)
-            except ClientDisconnected:
-                self._mark_client_disconnected(record, capture_path)
             finally:
-                self._append_record_index(record, capture_path)
+                exc.close()
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             record["error"] = {"type": type(exc).__name__, "message": "Upstream transport failed"}
             self._finish_record(

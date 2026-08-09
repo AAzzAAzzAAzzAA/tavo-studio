@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://codex.local/tavo/schemas/tpg-manifest.schema.json",
+  "$id": "https://example.invalid/tavo-skill/schemas/tpg-manifest.schema.json",
   "title": "Tavo Plugin Manifest 0.93",
   "description": "Schema for Tavo plugin manifest specs 1 and 2. Omitted specVersion means v1; root entry wins over the legacy scripts.actions alias.",
   "type": "object",

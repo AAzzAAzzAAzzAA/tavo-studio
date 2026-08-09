@@ -1,698 +1,476 @@
 #!/usr/bin/env python3
-"""Full local audit for the Tavo encyclopedia skill."""
+"""Comprehensive, self-contained audit for the community Tavo skill."""
 
 from __future__ import annotations
 
 import argparse
 import ast
+import ipaddress
 import json
+import os
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from validate_tavo_artifact import validate as validate_artifact
 from validate_tpg_package import validate_package
 
 
-FORBIDDEN_TEXT = re.compile(r"(TO" + r"DO|place" + r"holder|\[TO" + r"DO)", re.IGNORECASE)
-SECRET_RE = re.compile(
-    r"(Bearer\s+[A-Za-z0-9._~+/=-]{4,}|sk-[A-Za-z0-9]{12,}|AIza[0-9A-Za-z_-]{20,}|api[_-]?key['\"]?\s*[:=]\s*['\"][^'\"]{8,})",
-    re.IGNORECASE,
-)
-TEXT_SCAN_SUFFIXES = {
-    ".cjs",
-    ".css",
-    ".html",
-    ".js",
-    ".json",
-    ".jsx",
-    ".md",
-    ".mjs",
-    ".py",
-    ".sh",
-    ".toml",
-    ".ts",
-    ".tsx",
-    ".txt",
-    ".xml",
-    ".yaml",
-    ".yml",
+REQUIRED_REFERENCES = {
+    "references/00-capability-boundaries.md",
+    *{f"references/{number:02d}-{name}.md" for number, name in [
+        (2, "capabilities-overview"),
+        (3, "characters-cards-personas"),
+        (4, "chat-workflows"),
+        (5, "prompt-authoring"),
+        (6, "macros-ejs"),
+        (7, "rendering-tavojs"),
+        (8, "plugins-tpg"),
+        (9, "media-voice-image"),
+        (10, "app-settings-data"),
+        (11, "mcp-runtime"),
+        (13, "creation-craft-workflows"),
+        (16, "capability-answer-playbook"),
+        (17, "authoring-blueprints"),
+        (18, "ar-tavojs-plugin-patterns"),
+        (19, "debugging-pitfalls"),
+        (21, "worldbook-entry-semantics"),
+        (22, "preset-prompt-injection"),
+        (23, "regex-execution-pipeline"),
+        (24, "character-opening-and-examples"),
+        (25, "ejs-tavojs-plugin-boundaries"),
+        (27, "prompt-lab"),
+        (29, "creation-intake-interview"),
+        (30, "prose-detone"),
+        (31, "prose-detone-catalog"),
+        (32, "prose-detone-narrative"),
+        (33, "quick-card-funnel"),
+    ]},
 }
-URL_RE = re.compile(r"^https?://", re.IGNORECASE)
-KNOWN_TEST_SECRET_LITERALS = (
-    "sk-1234567890abcdefghijklmnop",
-    "Bearer secret-token",
-    "Bearer secret-value",
-    "Bearer hidden",
-    "Bearer secret",
-    "Bearer 123456",
-    "Bearer token",
-    "Bearer tokens",
-    "Bearer requires",
-    '"api_key": "body-secret"',
-    'apiKey": "<redacted>"',
-    'apiKey": "sk-live-123"',
-)
-SENSITIVE_JSON_KEYS = {
-    "api_key",
-    "apikey",
-    "auth",
-    "authorization",
-    "client_secret",
-    "id_token",
-    "password",
-    "refresh_token",
-    "secret",
-    "token",
-    "access_token",
+
+REQUIRED_SCRIPTS = {
+    f"scripts/{name}"
+    for name in [
+        "audit_skill_skeleton.py",
+        "audit_tavo_skill.py",
+        "compare_roundtrip_export.py",
+        "embed_st_card_png.mjs",
+        "extract_st_card_png.mjs",
+        "generate_from_template.py",
+        "png-card-lib.mjs",
+        "run_regex_fixtures.py",
+        "scan_deprecated_tavojs.py",
+        "tavo_ejs_worker.mjs",
+        "tavo_mcp_client.py",
+        "tavo_prompt_lab.py",
+        "tavo_request_capture_gateway.py",
+        "tavo_virtual_provider.py",
+        "test_tavo_prompt_lab.py",
+        "test_tavo_mcp_client.py",
+        "test_tavo_request_capture_gateway.py",
+        "test_tavo_virtual_provider.py",
+        "test_validate_tpg_package.py",
+        "tpg_spec2.py",
+        "validate_tavo_artifact.py",
+        "validate_tpg_package.py",
+        "worldbook_to_character_book.mjs",
+    ]
 }
-ALLOWED_REDACTED_VALUES = {"<redacted>", "<redacted-secret>"}
 
-REQUIRED_REFERENCES = [
-    "references/00-source-of-truth.md",
-    "references/01-official-url-map.md",
-    "references/02-capabilities-overview.md",
-    "references/03-characters-cards-personas.md",
-    "references/04-chat-workflows.md",
-    "references/05-prompt-authoring.md",
-    "references/06-macros-ejs.md",
-    "references/07-rendering-tavojs.md",
-    "references/08-plugins-tpg.md",
-    "references/09-media-voice-image.md",
-    "references/10-app-settings-data.md",
-    "references/11-mcp-runtime.md",
-    "references/12-validation-matrix.md",
-    "references/13-creation-craft-workflows.md",
-    "references/14-evidence-registry.md",
-    "references/15-phone-validation-runbook.md",
-    "references/16-capability-answer-playbook.md",
-    "references/17-authoring-blueprints.md",
-    "references/18-ar-tavojs-plugin-patterns.md",
-    "references/19-debugging-pitfalls.md",
-    "references/20-forward-testing.md",
-    "references/21-worldbook-entry-semantics.md",
-    "references/22-preset-prompt-injection.md",
-    "references/23-regex-execution-pipeline.md",
-    "references/24-character-opening-and-examples.md",
-    "references/25-ejs-tavojs-plugin-boundaries.md",
-    "references/26-tavo-093-live-evidence.md",
-    "references/27-prompt-lab.md",
-    "references/historical/deprecated-claims.md",
-]
-
-REQUIRED_SCRIPTS = [
-    "scripts/fetch_official_docs.py",
-    "scripts/normalize_official_docs.py",
-    "scripts/dump_mcp_surface.py",
-    "scripts/test_dump_mcp_surface.py",
-    "scripts/normalize_mcp_surface.py",
-    "scripts/tavo_mcp_client.py",
-    "scripts/tavo_phone_capture.py",
-    "scripts/tavo_phone_validate.py",
-    "scripts/run_phone_kpi_batch.py",
-    "scripts/run_phone_coverage_kpi.py",
-    "scripts/run_phone_ejs_runtime_diagnostic.py",
-    "scripts/run_phone_import_kpi.py",
-    "scripts/run_phone_preset_hidden_seed_diagnostic.py",
-    "scripts/run_phone_semantic_kpi.py",
-    "scripts/run_phone_semantic_ui_preflight.py",
-    "scripts/run_phone_cross_feature_matrix.py",
-    "scripts/aggregate_cross_feature_matrix.py",
-    "scripts/run_phone_prompt_edge_matrix.py",
-    "scripts/test_run_phone_prompt_edge_matrix.py",
-    "scripts/run_phone_asset_roundtrip_matrix.py",
-    "scripts/test_run_phone_asset_roundtrip_matrix.py",
-    "scripts/run_phone_media_provider_matrix.py",
-    "scripts/test_run_phone_media_provider_matrix.py",
-    "scripts/run_phone_plugin_092_matrix.py",
-    "scripts/test_run_phone_plugin_092_matrix.py",
-    "scripts/tavo_093_runner_core.py",
-    "scripts/tavo_093_full_catalog.py",
-    "scripts/test_tavo_093_full_catalog.py",
-    "scripts/run_phone_plugin_093_matrix.py",
-    "scripts/test_run_phone_plugin_093_matrix.py",
-    "scripts/run_phone_plugin_093_live.py",
-    "scripts/test_run_phone_plugin_093_live.py",
-    "scripts/run_phone_plugin_093_package_actual.py",
-    "scripts/test_run_phone_plugin_093_package_actual.py",
-    "scripts/run_phone_093_nonplugin_matrix.py",
-    "scripts/test_run_phone_093_nonplugin_matrix.py",
-    "scripts/run_phone_093_master.py",
-    "scripts/test_run_phone_093_master.py",
-    "scripts/tavo_virtual_provider.py",
-    "scripts/test_tavo_virtual_provider.py",
-    "scripts/tavo_prompt_lab.py",
-    "scripts/test_tavo_prompt_lab.py",
-    "scripts/tavo_fixture_capture_assert.py",
-    "scripts/test_tavo_fixture_capture_assert.py",
-    "scripts/tavo_generation_hook_fixture.py",
-    "scripts/test_tavo_generation_hook_fixture.py",
-    "scripts/tavo_request_capture_gateway.py",
-    "scripts/test_tavo_request_capture_gateway.py",
-    "scripts/test_run_phone_semantic_kpi_faults.py",
-    "scripts/test_run_phone_cross_feature_matrix.py",
-    "scripts/tavo_ui_tree.py",
-    "scripts/test_tavo_ui_tree.py",
-    "scripts/audit_skill_skeleton.py",
-    "scripts/audit_tavo_skill.py",
-    "scripts/validate_tavo_artifact.py",
-    "scripts/generate_from_template.py",
-    "scripts/run_regex_fixtures.py",
-    "scripts/validate_tpg_package.py",
-    "scripts/tpg_spec2.py",
-    "scripts/test_validate_tpg_package.py",
-    "scripts/scan_deprecated_tavojs.py",
-    "scripts/compare_roundtrip_export.py",
-    "scripts/record_validation_artifact.py",
-    "scripts/png-card-lib.mjs",
-    "scripts/embed_st_card_png.mjs",
-    "scripts/extract_st_card_png.mjs",
-    "scripts/worldbook_to_character_book.mjs",
-]
-
-REQUIRED_ASSETS = [
-    "assets/official-docs/official_manifest.json",
-    "assets/official-docs/official_manifest-20260726.json",
-    "assets/official-docs/url_map-20260726.json",
-    "assets/evidence/registry.json",
+REQUIRED_ASSETS = {
     "assets/fixtures/minimal-card.json",
-    "assets/fixtures/worldbook-basic.json",
-    "assets/fixtures/regex-cleanup-fixture.json",
-    "assets/fixtures/plugin-minimal/manifest.json",
-    "assets/fixtures/plugin-minimal/entry.js",
-    "assets/fixtures/plugin-legacy/manifest.json",
-    "assets/fixtures/plugin-legacy/legacy-actions.js",
-    "assets/fixtures/plugin-dual/manifest.json",
-    "assets/fixtures/plugin-dual/entry.js",
-    "assets/fixtures/plugin-hook-only/manifest.json",
-    "assets/fixtures/plugin-hook-only/entry.js",
-    "assets/fixtures/plugin-dangerous-path/manifest.json",
-    "assets/fixtures/plugin-nested/wrapper/manifest.json",
-    "assets/fixtures/plugin-nested/wrapper/entry.js",
     "assets/fixtures/plugin-ambiguous/one/manifest.json",
     "assets/fixtures/plugin-ambiguous/two/manifest.json",
+    "assets/fixtures/plugin-dangerous-path/manifest.json",
+    "assets/fixtures/plugin-dual/entry.js",
+    "assets/fixtures/plugin-dual/manifest.json",
+    "assets/fixtures/plugin-hook-only/entry.js",
+    "assets/fixtures/plugin-hook-only/manifest.json",
+    "assets/fixtures/plugin-legacy/legacy-actions.js",
+    "assets/fixtures/plugin-legacy/manifest.json",
+    "assets/fixtures/plugin-minimal/entry.js",
+    "assets/fixtures/plugin-minimal/manifest.json",
+    "assets/fixtures/plugin-minimal/ui/panel.html",
     "assets/fixtures/plugin-missing-entry/manifest.json",
-    "assets/schemas/st-card-v2.schema.json",
-    "assets/schemas/worldbook.schema.json",
+    "assets/fixtures/plugin-nested/wrapper/entry.js",
+    "assets/fixtures/plugin-nested/wrapper/manifest.json",
+    "assets/fixtures/regex-cleanup-fixture.json",
+    "assets/fixtures/worldbook-basic.json",
+    "assets/schemas/character-book.schema.json",
     "assets/schemas/regex-fixture.schema.json",
+    "assets/schemas/st-card-v2.schema.json",
     "assets/schemas/tpg-manifest.schema.json",
-    "assets/schemas/mcp-surface.schema.json",
-    "assets/schemas/mcp-surface-0.91.0-20260710.json",
-    "assets/schemas/mcp-surface-index-0.91.0-20260710.json",
-    "assets/schemas/mcp-surface-0.92.0-20260716.json",
-    "assets/schemas/mcp-surface-index-0.92.0-20260716.json",
-    "assets/schemas/validation-artifact.schema.json",
-    "assets/schemas/evidence-registry.schema.json",
-    "assets/evidence/0.92.0/20260716-gate.json",
-    "assets/evidence/0.92.0/20260717-live-matrix.json",
-    "assets/evidence/0.93.0/20260726-gate.json",
-    "assets/evidence/0.93.0/20260726-zero-real-matrix.json",
-    "assets/evidence/0.93.0/20260726-case-outcomes.json",
+    "assets/schemas/worldbook.schema.json",
     "assets/templates/character-card-minimal.json",
-    "assets/templates/prompt-lab-case.json",
+    "assets/templates/advanced-rendering-marker.html",
     "assets/templates/worldbook-minimal.json",
     "assets/templates/regex-fixture.json",
-    "assets/templates/advanced-rendering-marker.html",
-    "assets/templates/plugin-minimal/manifest.json",
+    "assets/templates/prompt-lab-case.json",
+    "assets/templates/prompt-lab-session-case.json",
     "assets/templates/plugin-minimal/entry.js",
-    "assets/templates/plugin-minimal/ui/panel.html",
     "assets/templates/plugin-minimal/locales/en.json",
     "assets/templates/plugin-minimal/locales/zh-CN.json",
-    "assets/templates/semantic-validation/plugin/manifest.json",
-    "assets/templates/semantic-validation/plugin/entry.js",
-    "assets/templates/semantic-validation/plugin/ui/panel.html",
-]
+    "assets/templates/plugin-minimal/manifest.json",
+    "assets/templates/plugin-minimal/ui/panel.html",
+}
 
-VALID_TPG_PACKAGE_ASSETS = [
-    "assets/templates/plugin-minimal",
-    "assets/fixtures/plugin-minimal",
-    "assets/fixtures/plugin-legacy",
-    "assets/fixtures/plugin-dual",
-    "assets/fixtures/plugin-hook-only",
-    "assets/fixtures/plugin-nested",
-]
+PERSONAL_PATTERNS = {
+    "personal macOS path": re.compile(re.escape("/" + "Users/") + r"[^/\s`\"']+"),
+    "personal Linux path": re.compile(
+        re.escape("/" + "home/") + r"(?!user\b|example\b)[^/\s`\"']+"
+    ),
+    "messaging-account identifier": re.compile(
+        r"\b" + re.escape("wx" + "id") + r"[_-][A-Za-z0-9_-]+", re.IGNORECASE
+    ),
+}
 
-INVALID_TPG_PACKAGE_ASSETS = [
-    "assets/fixtures/plugin-dangerous-path",
-    "assets/fixtures/plugin-ambiguous",
-    "assets/fixtures/plugin-missing-entry",
-]
+RESULT_ONLY_SECTION_RE = re.compile(
+    r"^#{1,3}\s+(?:"
+    + "Official" + r"\s+(?:Pages?|URL\s+Map)|"
+    + "Evidence" + r"\s+(?:Snapshot|Set|Ledger)|"
+    + "Source" + r"\s+And\s+Behavior\s+Order|"
+    + "Refresh" + r"\s+Commands|"
+    + "证据" + r"(?:快照|索引))\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+DISCOVERY_PROCESS_RE = re.compile(
+    r"(?:"
+    + "retained" + r"\s+(?:(?:phone|provider|wire|Tavo)\s+)?captures?|"
+    + r"\b" + "phone" + r"\s+captures?|"
+    + r"\b" + "provider" + r"\s+captures?|"
+    + r"\b" + "wire" + r"\s+(?:captures?|oracle)|"
+    + "live" + r"[- ]calibrated|"
+    + "evidence" + r"[- ]bounded|"
+    + "fresh" + r"\s+(?:crawl|fetch)|"
+    + "official" + r"\s+(?:docs?|surfaces?)\s+(?:crawl|conflict)|"
+    + "抓" + "取" + r"|" + "取" + "证" + r")",
+    re.IGNORECASE,
+)
+LEGACY_SOURCE_WORDING_RE = re.compile(
+    r"\bthe\s+" + "old" + r"\s+[A-Za-z0-9_-]*(?:\s+[A-Za-z0-9_-]+){0,3}\s+"
+    + "skill" + r"\s+(?:used|said|documented)\b",
+    re.IGNORECASE,
+)
+PRIVATE_BUNDLE_PATH_RE = re.compile(
+    r"(?:^|[`'\"\s])(?:artifact|evidence|capture)s?/[A-Za-z0-9_.-]",
+    re.IGNORECASE,
+)
+HTTP_URL_RE = re.compile(r"https?://[^\s)`>\"]+")
+LEGACY_TRIGGER_RE = re.compile(re.escape("$" + "tavo") + r"(?!-skill)\b")
+DEFAULT_PROMPT_TRIGGER_RE = re.compile(
+    r"^\s+default_prompt:\s*[^\n]*" + re.escape("$tavo-skill") + r"[^\n]*$", re.MULTILINE
+)
+IPV4_RE = re.compile(r"(?<![0-9.])(?:\d{1,3}\.){3}\d{1,3}(?![0-9.])")
+EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+SECRET_RE = re.compile(
+    r"(?:Bearer\s+(?!(?:requires|token|authentication)\b)[A-Za-z0-9._~+/=-]{12,}|sk-[A-Za-z0-9_-]{16,}|"
+    r"AIza[0-9A-Za-z_-]{20,})",
+    re.IGNORECASE,
+)
+TEXT_SUFFIXES = {".md", ".yaml", ".yml", ".json", ".py", ".js", ".mjs", ".html"}
+ALLOWED_URL_HOSTS = {
+    "127.0.0.1",
+    "example.invalid",
+    "json-schema.org",
+    "localhost",
+    "provider.example",
+    "replace-with-provider.example",
+}
+ALLOWED_TEST_NETWORKS = tuple(
+    ipaddress.ip_network(value)
+    for value in ("127.0.0.0/8", "::1/128", "192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24")
+)
+FULL_TEST_COMMAND = "python3 -B -W error::ResourceWarning -m unittest discover -s scripts -p 'test_*.py'"
 
-TERMINAL_EVIDENCE_MANIFESTS = [
-    "artifacts/tavo-validation/20260710-020132-strict-import-kpi/run-manifest.json",
-    "artifacts/tavo-validation/20260710-203300-semantic-model-kpi-v23/run-manifest.json",
-]
+REQUIRED_FILES = {
+    "SKILL.md",
+    "agents/openai.yaml",
+    *REQUIRED_REFERENCES,
+    *REQUIRED_SCRIPTS,
+    *REQUIRED_ASSETS,
+}
+REQUIRED_DIRECTORIES = {
+    parent.as_posix()
+    for relative in REQUIRED_FILES
+    for parent in Path(relative).parents
+    if parent.as_posix() != "."
+}
 
 
-def read(path: Path) -> str:
+def rel(path: Path, root: Path) -> str:
+    return path.relative_to(root).as_posix()
+
+
+def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
-def local_source_path(value: str) -> str:
-    """Remove optional line/fragment selectors from a local evidence source."""
+def package_files(root: Path) -> list[Path]:
+    return sorted(
+        path
+        for path in root.rglob("*")
+        if path.is_file()
+        and ".git" not in path.parts
+        and "__pycache__" not in path.parts
+        and path.suffix not in {".pyc", ".pyo"}
+    )
 
-    without_fragment = value.partition("#")[0]
-    return re.sub(r":\d+(?:-\d+)?$", "", without_fragment)
+
+def package_entries(root: Path) -> list[Path]:
+    return sorted(
+        path
+        for path in root.rglob("*")
+        if ".git" not in path.relative_to(root).parts
+    )
 
 
-def scan_json_secret_values(value: object, rel: str, errors: list[str], path: str = "") -> None:
-    """Reject non-empty credential values stored under explicit JSON secret keys."""
+def is_allowed_placeholder_secret(value: str) -> bool:
+    upper = value.upper()
+    return any(marker in upper for marker in ("EXAMPLE", "TEST", "REDACTED", "PLACEHOLDER", "HIDDEN")) or "<" in value
 
-    if isinstance(value, dict):
-        for key, child in value.items():
-            child_path = f"{path}.{key}" if path else str(key)
-            normalized = re.sub(r"[- ]", "_", str(key).lower())
-            if normalized in SENSITIVE_JSON_KEYS and isinstance(child, str) and child and child not in ALLOWED_REDACTED_VALUES:
-                errors.append(f"possible structured secret found in {rel}:{child_path}")
-            scan_json_secret_values(child, rel, errors, child_path)
-    elif isinstance(value, list):
-        for index, child in enumerate(value):
-            scan_json_secret_values(child, rel, errors, f"{path}[{index}]")
+
+def check_private_ipv4(text: str) -> list[str]:
+    findings: list[str] = []
+    for raw in IPV4_RE.findall(text):
+        try:
+            address = ipaddress.ip_address(raw)
+        except ValueError:
+            continue
+        if raw == "0.0.0.0" or any(address in network for network in ALLOWED_TEST_NETWORKS):
+            continue
+        if address.is_private or address.is_link_local:
+            findings.append(raw)
+    return findings
+
+
+def check_package_shape(root: Path, errors: list[str]) -> tuple[list[Path], list[Path], list[Path]]:
+    for required in sorted(REQUIRED_FILES):
+        if not (root / required).is_file():
+            errors.append(f"missing required file: {required}")
+
+    for path in package_entries(root):
+        relative = rel(path, root)
+        parts = path.relative_to(root).parts
+        if path.is_symlink():
+            errors.append(f"symlinks are not allowed in the package: {relative}")
+            continue
+        if any(part.startswith(".") for part in parts):
+            errors.append(f"hidden package entry is not allowed: {relative}")
+        if path.is_file() and relative not in REQUIRED_FILES:
+            errors.append(f"unindexed community file: {relative}")
+        if path.is_dir() and relative not in REQUIRED_DIRECTORIES:
+            errors.append(f"unindexed community directory: {relative}")
+
+    refs = sorted((root / "references").rglob("*.md"))
+    scripts = sorted(path for path in (root / "scripts").iterdir() if path.is_file())
+    assets = sorted(path for path in (root / "assets").rglob("*") if path.is_file())
+    actual_refs = {rel(path, root) for path in refs}
+    actual_scripts = {rel(path, root) for path in scripts}
+    actual_assets = {rel(path, root) for path in assets}
+    if actual_refs != REQUIRED_REFERENCES:
+        for item in sorted(actual_refs - REQUIRED_REFERENCES):
+            errors.append(f"unindexed community reference: {item}")
+        for item in sorted(REQUIRED_REFERENCES - actual_refs):
+            errors.append(f"required community reference absent: {item}")
+    if actual_scripts != REQUIRED_SCRIPTS:
+        for item in sorted(actual_scripts - REQUIRED_SCRIPTS):
+            errors.append(f"unindexed community script: {item}")
+        for item in sorted(REQUIRED_SCRIPTS - actual_scripts):
+            errors.append(f"required community script absent: {item}")
+    if actual_assets != REQUIRED_ASSETS:
+        for item in sorted(actual_assets - REQUIRED_ASSETS):
+            errors.append(f"unindexed community asset: {item}")
+        for item in sorted(REQUIRED_ASSETS - actual_assets):
+            errors.append(f"required community asset absent: {item}")
+    return refs, scripts, assets
+
+
+def check_text(root: Path, files: list[Path], refs: list[Path], errors: list[str]) -> None:
+    for path in files:
+        relative = rel(path, root)
+        if path.suffix.lower() not in TEXT_SUFFIXES:
+            errors.append(f"unexpected non-text distributable file: {relative}")
+            continue
+        text = read_text(path)
+        for label, pattern in PERSONAL_PATTERNS.items():
+            if pattern.search(text):
+                errors.append(f"{label} found in {relative}")
+        if LEGACY_TRIGGER_RE.search(text):
+            errors.append(f"legacy trigger found in {relative}")
+        if RESULT_ONLY_SECTION_RE.search(text):
+            errors.append(f"source/provenance section found in {relative}")
+        if DISCOVERY_PROCESS_RE.search(text):
+            errors.append(f"discovery-process wording found in {relative}")
+        if LEGACY_SOURCE_WORDING_RE.search(text):
+            errors.append(f"legacy source wording found in {relative}")
+        if PRIVATE_BUNDLE_PATH_RE.search(text):
+            errors.append(f"private bundle path found in {relative}")
+        for match in SECRET_RE.finditer(text):
+            if not is_allowed_placeholder_secret(match.group(0)):
+                errors.append(f"credential-like value found in {relative}")
+                break
+        for email in EMAIL_RE.findall(text):
+            if not email.lower().endswith(("@example.com", "@example.invalid")):
+                errors.append(f"email address found in {relative}")
+                break
+        private_ips = check_private_ipv4(text)
+        if private_ips:
+            errors.append(f"private network address found in {relative}: {private_ips[0]}")
+        for url in HTTP_URL_RE.findall(text):
+            if "{" in url:
+                host_match = re.match(r"https?://(?:\{[^}]+\}|(?P<host>\[[^]]+\]|[^/:]+))", url)
+                if not host_match or host_match.group("host") is None:
+                    continue
+                host = host_match.group("host").strip("[]").lower()
+            else:
+                try:
+                    host = (urlsplit(url).hostname or "").lower()
+                except ValueError:
+                    errors.append(f"invalid URL literal found in {relative}")
+                    break
+            allowed_test_address = False
+            try:
+                address = ipaddress.ip_address(host)
+                allowed_test_address = any(address in network for network in ALLOWED_TEST_NETWORKS)
+            except ValueError:
+                pass
+            if host not in ALLOWED_URL_HOSTS and not allowed_test_address:
+                errors.append(f"non-placeholder URL found in {relative}")
+                break
+
+
+def check_syntax(root: Path, scripts: list[Path], assets: list[Path], errors: list[str]) -> None:
+    if sys.version_info < (3, 10):
+        errors.append("Python 3.10 or newer is required")
+    for path in scripts:
+        if path.suffix == ".py":
+            try:
+                ast.parse(read_text(path), filename=rel(path, root))
+            except SyntaxError as exc:
+                errors.append(f"Python syntax error in {rel(path, root)}: {exc}")
+
+    node = shutil.which("node")
+    if not node:
+        errors.append("Node.js is required to check bundled JavaScript")
+        return
+    node_help = subprocess.run([node, "--help"], capture_output=True, text=True, check=False)
+    help_text = f"{node_help.stdout}\n{node_help.stderr}"
+    if node_help.returncode or "--permission" not in help_text or "--allow-fs-read" not in help_text:
+        errors.append("Node.js must support --permission and --allow-fs-read")
+    for path in [*scripts, *assets]:
+        if path.suffix not in {".js", ".mjs"}:
+            continue
+        completed = subprocess.run([node, "--check", str(path)], capture_output=True, text=True, check=False)
+        if completed.returncode:
+            detail = (completed.stderr or completed.stdout).strip().splitlines()
+            errors.append(f"JavaScript syntax error in {rel(path, root)}: {detail[-1] if detail else 'node --check failed'}")
+
+
+def check_prompt_lab_templates(root: Path, errors: list[str]) -> None:
+    script = root / "scripts/tavo_prompt_lab.py"
+    for relative in (
+        "assets/templates/prompt-lab-case.json",
+        "assets/templates/prompt-lab-session-case.json",
+    ):
+        environment = dict(os.environ)
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        completed = subprocess.run(
+            [sys.executable, "-B", str(script), "compile", "--case", str(root / relative)],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=environment,
+        )
+        if completed.returncode:
+            errors.append(f"Prompt Lab template compile failed: {relative}")
+            continue
+        try:
+            result = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            errors.append(f"Prompt Lab template returned invalid JSON: {relative}")
+            continue
+        if result.get("mode") == "compile-session":
+            turns = result.get("turns")
+            compiled_results = turns if isinstance(turns, list) and turns else []
+        else:
+            compiled_results = [result]
+        if not compiled_results:
+            errors.append(f"Prompt Lab template compiled without turns: {relative}")
+            continue
+        for index, compiled in enumerate(compiled_results, start=1):
+            request = compiled.get("request") if isinstance(compiled, dict) else None
+            messages = request.get("messages") if isinstance(request, dict) else None
+            ejs = compiled.get("ejs") if isinstance(compiled, dict) else None
+            unresolved = ejs.get("unresolvedSources") if isinstance(ejs, dict) else None
+            if not isinstance(messages, list) or not messages:
+                errors.append(f"Prompt Lab template turn {index} has no request messages: {relative}")
+            if unresolved != []:
+                errors.append(f"Prompt Lab template turn {index} has unresolved EJS: {relative}")
+
+
+def check_json_and_artifacts(root: Path, assets: list[Path], errors: list[str]) -> None:
+    for path in assets:
+        if path.suffix != ".json":
+            continue
+        try:
+            json.loads(read_text(path))
+        except json.JSONDecodeError as exc:
+            errors.append(f"invalid JSON in {rel(path, root)}: {exc}")
+
+    cases = [
+        ("assets/fixtures/minimal-card.json", "card"),
+        ("assets/templates/character-card-minimal.json", "card"),
+        ("assets/fixtures/worldbook-basic.json", "worldbook"),
+        ("assets/templates/worldbook-minimal.json", "worldbook"),
+        ("assets/fixtures/regex-cleanup-fixture.json", "regex-fixture"),
+        ("assets/templates/regex-fixture.json", "regex-fixture"),
+    ]
+    for relative, kind in cases:
+        for problem in validate_artifact(root / relative, kind):
+            errors.append(f"{relative}: {problem}")
+
+    for relative in ("assets/fixtures/plugin-minimal", "assets/templates/plugin-minimal"):
+        result = validate_package(root / relative)
+        for problem in result.errors:
+            errors.append(f"{relative}: {problem}")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Audit the Tavo skill.")
+    parser = argparse.ArgumentParser(description="Audit the self-contained community Tavo skill.")
     parser.add_argument("skill_dir", nargs="?", default=Path(__file__).resolve().parents[1])
     args = parser.parse_args()
     root = Path(args.skill_dir).expanduser().resolve()
     errors: list[str] = []
 
-    skill_md = root / "SKILL.md"
-    if not skill_md.exists():
-        errors.append("SKILL.md missing")
-        print("\n".join(f"ERROR: {e}" for e in errors), file=sys.stderr)
-        return 1
-    skill_text = read(skill_md)
-    url_map_text = read(root / "references/01-official-url-map.md") if (root / "references/01-official-url-map.md").exists() else ""
-    for rel in REQUIRED_REFERENCES:
-        path = root / rel
-        if not path.exists():
-            errors.append(f"missing required reference: {rel}")
+    refs, scripts, assets = check_package_shape(root, errors)
+    files = package_files(root)
+    check_text(root, files, refs, errors)
+    check_syntax(root, scripts, assets, errors)
+    check_json_and_artifacts(root, assets, errors)
+    check_prompt_lab_templates(root, errors)
 
-    reference_paths = sorted((root / "references").rglob("*.md")) if (root / "references").is_dir() else []
-    all_reference_text = skill_text
-    for path in reference_paths:
-        rel = path.relative_to(root).as_posix()
-        text = read(path)
-        all_reference_text += "\n" + text
-        if rel not in skill_text and rel not in url_map_text:
-            errors.append(f"reference not indexed in SKILL.md or official URL map: {rel}")
-        if FORBIDDEN_TEXT.search(text):
-            errors.append(f"initialization remnant found in {rel}")
-
-    for rel in REQUIRED_SCRIPTS:
-        path = root / rel
-        if not path.exists():
-            errors.append(f"missing required script: {rel}")
-
-    script_paths = sorted(
-        path
-        for path in (root / "scripts").rglob("*")
-        if path.is_file() and "__pycache__" not in path.parts and path.suffix not in {".pyc", ".pyo"}
-    ) if (root / "scripts").is_dir() else []
-    for path in script_paths:
-        rel = path.relative_to(root).as_posix()
-        if rel not in all_reference_text:
-            errors.append(f"script not documented in SKILL.md/references: {rel}")
-        if path.suffix == ".py":
-            try:
-                ast.parse(read(path), filename=str(path))
-            except SyntaxError as exc:
-                errors.append(f"python syntax check failed for {rel}: {exc}")
-
-    for rel in REQUIRED_ASSETS:
-        if not (root / rel).exists():
-            errors.append(f"missing required asset: {rel}")
-
-    for rel in VALID_TPG_PACKAGE_ASSETS:
-        path = root / rel
-        if path.exists():
-            result = validate_package(path)
-            if result.errors:
-                errors.append(f"valid TPG fixture failed {rel}: {'; '.join(result.errors)}")
-
-    for rel in INVALID_TPG_PACKAGE_ASSETS:
-        path = root / rel
-        if path.exists() and not validate_package(path).errors:
-            errors.append(f"negative TPG fixture unexpectedly passed: {rel}")
-
-    for gitkeep in root.glob("assets/*/.gitkeep"):
-        parent_files = [p for p in gitkeep.parent.iterdir() if p.name != ".gitkeep"]
-        if not parent_files:
-            errors.append(f"asset directory is still placeholder-only: {gitkeep.parent.relative_to(root)}")
-
-    for path in (
-        candidate
-        for candidate in root.rglob("*")
-        if candidate.is_file()
-        and candidate.suffix.lower() in TEXT_SCAN_SUFFIXES
-        and "__pycache__" not in candidate.parts
-        and (not candidate.relative_to(root).parts or candidate.relative_to(root).parts[0] != "artifacts")
-    ):
-        rel = path.relative_to(root).as_posix()
-        text = read(path)
-        scanned_text = text
-        for literal in KNOWN_TEST_SECRET_LITERALS:
-            scanned_text = re.sub(re.escape(literal), "<known-test-secret>", scanned_text, flags=re.IGNORECASE)
-        if SECRET_RE.search(scanned_text):
-            errors.append(f"possible secret found in {rel}")
-        if path.suffix.lower() == ".json":
-            try:
-                scan_json_secret_values(json.loads(text), rel, errors)
-            except json.JSONDecodeError:
-                pass
-
-    workspace_candidate = root.parents[2] if len(root.parents) > 2 else None
-    workspace_root = (
-        workspace_candidate
-        if workspace_candidate is not None
-        and (root / "artifacts/tavo-validation").is_dir()
-        else None
-    )
-    registry_path = root / "assets/evidence/registry.json"
-    if registry_path.exists():
-        try:
-            registry = json.loads(read(registry_path))
-            if len(registry.get("claims", [])) < 5:
-                errors.append("evidence registry must contain at least five seed claims")
-            errors.extend(f"registry: {error}" for error in validate_artifact(registry_path, "registry"))
-            for index, claim in enumerate(registry.get("claims", [])):
-                if not isinstance(claim, dict):
-                    continue
-                for field in ("official_source", "mcp_source", "live_artifact"):
-                    value = claim.get(field, "")
-                    if not isinstance(value, str) or not value or URL_RE.match(value):
-                        continue
-                    path_value = local_source_path(value)
-                    candidate = root / path_value if path_value.startswith(("assets/", "references/", "scripts/")) else None
-                    if candidate is None and workspace_root is not None:
-                        candidate = workspace_root / path_value
-                    if candidate is not None and not candidate.exists():
-                        errors.append(f"registry claim {index} {field} does not exist: {value}")
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"registry JSON parse failed: {exc}")
-
-    live_matrix_path = root / "assets/evidence/0.92.0/20260717-live-matrix.json"
-    if live_matrix_path.exists():
-        try:
-            live_matrix = json.loads(read(live_matrix_path))
-            if live_matrix.get("artifactType") != "tavo-live-atomic-evidence-summary":
-                errors.append("0.92 live matrix has an unexpected artifactType")
-            if live_matrix.get("appVersion") != "0.92.0":
-                errors.append("0.92 live matrix has an unexpected appVersion")
-            source_run = live_matrix.get("sourceRun")
-            if not isinstance(source_run, str) or not source_run:
-                errors.append("0.92 live matrix sourceRun is missing")
-            elif workspace_root is not None and not (workspace_root / source_run).is_dir():
-                errors.append(f"0.92 live matrix sourceRun does not exist: {source_run}")
-            for section_name in ("coreMatrix", "packageAndBackup", "supplemental"):
-                section = live_matrix.get(section_name)
-                if not isinstance(section, dict):
-                    errors.append(f"0.92 live matrix section is missing: {section_name}")
-                    continue
-                sources = section.get("sourceArtifacts")
-                if not isinstance(sources, list) or not sources:
-                    errors.append(f"0.92 live matrix {section_name} sourceArtifacts must be a non-empty list")
-                    continue
-                for source in sources:
-                    if not isinstance(source, str) or not source:
-                        errors.append(f"0.92 live matrix {section_name} has an invalid source artifact")
-                        continue
-                    if re.search(r"(?:audit[-_.]?draft|provisional|draft)", Path(source).name, re.IGNORECASE):
-                        errors.append(f"0.92 live matrix {section_name} points to a draft artifact: {source}")
-                    if workspace_root is not None and not (workspace_root / source).exists():
-                        errors.append(f"0.92 live matrix {section_name} source does not exist: {source}")
-            if workspace_root is not None:
-                evaluation_path = workspace_root / "artifacts/tavo-validation/20260716-204923-tavo-092-live/matrix-evaluation.json"
-                matrix_path = workspace_root / "artifacts/tavo-validation/20260716-204923-tavo-092-live/matrix-evidence.json"
-                if evaluation_path.exists() and matrix_path.exists():
-                    evaluation = json.loads(read(evaluation_path))
-                    immutable_matrix = json.loads(read(matrix_path))
-                    core = live_matrix.get("coreMatrix", {})
-                    if core.get("overallStatus") != evaluation.get("overallStatus"):
-                        errors.append("0.92 live matrix core overallStatus does not match immutable evaluation")
-                    for key, value in core.get("caseTotals", {}).items():
-                        source_key = key if key != "notApplicable" else "not-applicable"
-                        if evaluation.get("caseTotals", {}).get(source_key) != value:
-                            errors.append(f"0.92 live matrix core caseTotals.{key} does not match immutable evaluation")
-                    assertion_key_map = {
-                        "total": "total",
-                        "passed": "passed",
-                        "failedProductBehavior": "failed_product_behavior",
-                        "blocked": "blocked",
-                        "manual": "manual",
-                        "notApplicable": "not-applicable",
-                    }
-                    for key, source_key in assertion_key_map.items():
-                        if core.get("assertionTotals", {}).get(key) != evaluation.get("assertionTotals", {}).get(source_key):
-                            errors.append(f"0.92 live matrix core assertionTotals.{key} does not match immutable evaluation")
-                    immutable_cases = immutable_matrix.get("cases", {})
-                    for case_id, case in core.get("cases", {}).items():
-                        if case_id not in immutable_cases or case.get("status") != immutable_cases[case_id].get("status"):
-                            errors.append(f"0.92 live matrix core {case_id} status does not match immutable matrix")
-                        assertion_projection = case.get("assertionStatuses")
-                        if assertion_projection is not None:
-                            immutable_projection = {
-                                assertion_id: assertion.get("status")
-                                for assertion_id, assertion in immutable_cases.get(case_id, {}).get("assertions", {}).items()
-                            }
-                            if assertion_projection != immutable_projection:
-                                errors.append(f"0.92 live matrix core {case_id} assertionStatuses do not match immutable matrix")
-                    if not isinstance(core.get("cases", {}).get("F11", {}).get("assertionStatuses"), dict):
-                        errors.append("0.92 live matrix core F11 requires immutable assertionStatuses")
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"0.92 live matrix JSON parse failed: {exc}")
-
-    gate_path = root / "assets/evidence/0.92.0/20260716-gate.json"
-    if gate_path.exists():
-        try:
-            gate = json.loads(read(gate_path))
-            device = gate.get("device", {})
-            state = gate.get("preservedUserState", {})
-            if device.get("serial") != "<redacted-device>":
-                errors.append("0.92 reusable gate must redact the device serial")
-            if "chatId" in state or "displayTitle" in state or state.get("privateChatIdentityIncluded") is not False:
-                errors.append("0.92 reusable gate must omit private chat identity")
-            if gate.get("mcp", {}).get("authorization") != "<redacted>":
-                errors.append("0.92 reusable gate must redact MCP authorization")
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"0.92 gate JSON parse failed: {exc}")
-
-    gate_093_path = root / "assets/evidence/0.93.0/20260726-gate.json"
-    matrix_093_path = root / "assets/evidence/0.93.0/20260726-zero-real-matrix.json"
-    outcomes_093_path = root / "assets/evidence/0.93.0/20260726-case-outcomes.json"
-    gate_093: dict[str, object] = {}
-    matrix_093: dict[str, object] = {}
-    outcomes_093: dict[str, object] = {}
-
-    try:
-        gate_093 = json.loads(read(gate_093_path))
-        if gate_093.get("artifactType") != "tavo-redacted-readiness-and-restoration-gate":
-            errors.append("0.93 gate has an unexpected artifactType")
-        app = gate_093.get("app", {})
-        mcp = gate_093.get("mcp", {})
-        restoration = gate_093.get("restoration", {})
-        policy = gate_093.get("policy", {})
-        redaction = gate_093.get("redaction", {})
-        if not isinstance(app, dict) or app.get("versionName") != "0.93.0" or app.get("versionCode") != 930:
-            errors.append("0.93 gate has an unexpected app identity")
-        if not isinstance(mcp, dict) or (
-            mcp.get("status") != "passed"
-            or mcp.get("requestedProtocolVersion") != "2025-06-18"
-            or mcp.get("negotiatedProtocolVersion") != "2025-06-18"
-            or [mcp.get("toolCount"), mcp.get("resourceCount"), mcp.get("resourceTemplateCount"), mcp.get("promptCount")]
-            != [70, 18, 7, 0]
-            or mcp.get("authorization") != "<redacted>"
-        ):
-            errors.append("0.93 gate MCP summary is incomplete or unexpected")
-        if not isinstance(restoration, dict) or restoration.get("passed") is not True:
-            errors.append("0.93 gate restoration did not pass")
-        if not isinstance(policy, dict) or (
-            policy.get("realModelRequestsSent") != 0
-            or policy.get("realProviderCredentialsUsed") is not False
-            or policy.get("countsTowardKpi") is not False
-        ):
-            errors.append("0.93 gate violates the zero-real-model policy")
-        if not isinstance(redaction, dict) or (
-            redaction.get("deviceSerialIncluded") is not False
-            or redaction.get("privateChatIdentityIncluded") is not False
-            or redaction.get("providerCredentialsIncluded") is not False
-            or redaction.get("backupContentsIncluded") is not False
-            or redaction.get("rawAudioIncluded") is not False
-        ):
-            errors.append("0.93 gate redaction contract is incomplete")
-    except Exception as exc:  # noqa: BLE001
-        errors.append(f"0.93 gate JSON parse failed: {exc}")
-
-    try:
-        matrix_093 = json.loads(read(matrix_093_path))
-        if matrix_093.get("artifactType") != "tavo-live-zero-real-evidence-summary":
-            errors.append("0.93 live matrix has an unexpected artifactType")
-        if matrix_093.get("appVersion") != "0.93.0":
-            errors.append("0.93 live matrix has an unexpected appVersion")
-        policy = matrix_093.get("policy", {})
-        terminal = matrix_093.get("terminal", {})
-        if not isinstance(policy, dict) or (
-            policy.get("mode") != "zero-real-model"
-            or policy.get("realModelRequestsSent") != 0
-            or policy.get("realProviderCredentialsUsed") is not False
-            or policy.get("countsTowardKpi") is not False
-            or policy.get("virtualResponsesCountAsModelSemantics") is not False
-        ):
-            errors.append("0.93 live matrix violates the zero-real-model policy")
-        expected_terminal = {
-            "total": 216,
-            "passed": 74,
-            "failed": 8,
-            "mixed": 38,
-            "blocked": 92,
-            "notApplicable": 4,
-        }
-        if not isinstance(terminal, dict) or any(terminal.get(key) != value for key, value in expected_terminal.items()):
-            errors.append("0.93 live matrix terminal counts are unexpected")
-        source_run = matrix_093.get("sourceRun")
-        if not isinstance(source_run, str) or not source_run:
-            errors.append("0.93 live matrix sourceRun is missing")
-        elif workspace_root is not None:
-            source_run_path = root / source_run if source_run.startswith("artifacts/") else workspace_root / source_run
-            if not source_run_path.is_dir():
-                errors.append(f"0.93 live matrix sourceRun does not exist: {source_run}")
-    except Exception as exc:  # noqa: BLE001
-        errors.append(f"0.93 live matrix JSON parse failed: {exc}")
-
-    try:
-        outcomes_093 = json.loads(read(outcomes_093_path))
-        explicit = outcomes_093.get("explicit", {})
-        ranges = outcomes_093.get("ranges", [])
-        calculated = {
-            "passed": 0,
-            "failed": 0,
-            "mixed": 0,
-            "blocked": 0,
-            "not-applicable": 0,
-        }
-        if not isinstance(explicit, dict):
-            errors.append("0.93 case outcomes explicit map is missing")
-        else:
-            for status in calculated:
-                values = explicit.get(status)
-                if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
-                    errors.append(f"0.93 case outcomes explicit.{status} is invalid")
-                else:
-                    calculated[status] += len(values)
-        if not isinstance(ranges, list):
-            errors.append("0.93 case outcomes ranges are invalid")
-        else:
-            for row in ranges:
-                if not isinstance(row, dict):
-                    errors.append("0.93 case outcomes range is not an object")
-                    continue
-                status = row.get("status")
-                start = row.get("start")
-                end = row.get("end")
-                if status not in calculated or not isinstance(start, int) or not isinstance(end, int) or end < start:
-                    errors.append("0.93 case outcomes range is invalid")
-                    continue
-                calculated[status] += end - start + 1
-        expected_calculated = {
-            "passed": 74,
-            "failed": 8,
-            "mixed": 38,
-            "blocked": 92,
-            "not-applicable": 4,
-        }
-        if calculated != expected_calculated or sum(calculated.values()) != 216:
-            errors.append(f"0.93 case outcomes counts are unexpected: {calculated}")
-        policy = outcomes_093.get("policy", {})
-        if not isinstance(policy, dict) or (
-            policy.get("realModelRequestsSent") != 0
-            or policy.get("realProviderCredentialsUsed") is not False
-            or policy.get("countsTowardKpi") is not False
-            or policy.get("virtualResponsesCountAsModelSemantics") is not False
-        ):
-            errors.append("0.93 case outcomes violate the zero-real-model policy")
-    except Exception as exc:  # noqa: BLE001
-        errors.append(f"0.93 case outcomes JSON parse failed: {exc}")
-
-    if workspace_root is not None and isinstance(matrix_093.get("sourceRun"), str):
-        source_run_value = str(matrix_093["sourceRun"])
-        source_run_path = root / source_run_value if source_run_value.startswith("artifacts/") else workspace_root / source_run_value
-        source_gate = source_run_path / "final-gate/mcp.json"
-        source_evaluation = source_run_path / "final-gate/evaluation.json"
-        source_outcomes = source_run_path / "phase-90/case-outcome-map.json"
-        try:
-            if source_gate.exists():
-                source = json.loads(read(source_gate))
-                reusable_mcp = gate_093.get("mcp", {}) if isinstance(gate_093, dict) else {}
-                for key in (
-                    "status",
-                    "requestedProtocolVersion",
-                    "negotiatedProtocolVersion",
-                    "toolCount",
-                    "resourceCount",
-                    "resourceTemplateCount",
-                    "promptCount",
-                    "surfaceSha256",
-                ):
-                    source_key = "finalSurfaceSha256" if key == "surfaceSha256" else key
-                    if isinstance(reusable_mcp, dict) and reusable_mcp.get(key) != source.get(source_key):
-                        errors.append(f"0.93 reusable gate does not match source MCP field: {key}")
-            else:
-                errors.append(f"0.93 source MCP gate is missing: {source_gate}")
-            if source_evaluation.exists():
-                source = json.loads(read(source_evaluation))
-                terminal = matrix_093.get("terminal", {}) if isinstance(matrix_093, dict) else {}
-                source_counts = source.get("terminalCounts", {})
-                key_map = {
-                    "passed": "passed",
-                    "failed": "failed",
-                    "mixed": "mixed",
-                    "blocked": "blocked",
-                    "notApplicable": "not-applicable",
-                }
-                for key, source_key in key_map.items():
-                    if isinstance(terminal, dict) and terminal.get(key) != source_counts.get(source_key):
-                        errors.append(f"0.93 reusable matrix does not match source terminal count: {key}")
-            else:
-                errors.append(f"0.93 source evaluation is missing: {source_evaluation}")
-            if source_outcomes.exists():
-                if outcomes_093 != json.loads(read(source_outcomes)):
-                    errors.append("0.93 reusable case outcomes differ from the immutable source map")
-            else:
-                errors.append(f"0.93 source case outcomes are missing: {source_outcomes}")
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"0.93 source comparison failed: {exc}")
-
-    if workspace_root is not None:
-        for rel in TERMINAL_EVIDENCE_MANIFESTS:
-            path = workspace_root / rel
-            if not path.exists():
-                errors.append(f"missing terminal evidence manifest: {rel}")
-                continue
-            errors.extend(f"{rel}: {error}" for error in validate_artifact(path, "validation-manifest"))
-
-    openai_yaml = root / "agents/openai.yaml"
-    if openai_yaml.exists():
-        text = read(openai_yaml)
-        expected_invocation = f"${root.name}"
-        if expected_invocation not in text:
-            errors.append(
-                "agents/openai.yaml default_prompt must include " + expected_invocation
-            )
-        short_match = re.search(r"short_description:\s*['\"]?([^'\"]+)['\"]?", text)
-        if short_match and len(short_match.group(1)) > 80:
-            errors.append("agents/openai.yaml short_description is too long")
-    else:
-        errors.append("agents/openai.yaml missing")
+    skill_text = read_text(root / "SKILL.md") if (root / "SKILL.md").is_file() else ""
+    if not re.search(r"^name:\s*tavo-skill\s*$", skill_text, re.MULTILINE):
+        errors.append("SKILL.md frontmatter name must be tavo-skill")
+    if FULL_TEST_COMMAND not in skill_text:
+        errors.append("SKILL.md must retain the ResourceWarning-strict full test command")
+    agent_text = read_text(root / "agents/openai.yaml") if (root / "agents/openai.yaml").is_file() else ""
+    if not DEFAULT_PROMPT_TRIGGER_RE.search(agent_text):
+        errors.append("agents/openai.yaml must invoke $tavo-skill")
 
     if errors:
-        for error in errors:
+        for error in sorted(set(errors)):
             print(f"ERROR: {error}", file=sys.stderr)
         return 1
+
     print("audit_tavo_skill_ok")
-    print(f"references={len(reference_paths)}")
-    print(f"scripts={len(script_paths)}")
-    print(f"assets={len(REQUIRED_ASSETS)}")
+    print(f"references={len(refs)}")
+    print(f"scripts={len(scripts)}")
+    print(f"assets={len(assets)}")
+    print(f"required_assets={len(REQUIRED_ASSETS)}")
     return 0
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit the Tavo skill skeleton wiring."""
+"""Audit the self-contained community Tavo skill skeleton."""
 
 from __future__ import annotations
 
@@ -9,103 +9,121 @@ import sys
 from pathlib import Path
 
 
-OLD_SKILL_PATHS = [
-    "/Users/<user>/.agents/skills/tavo-complete",
-    "/Users/<user>/.agents/skills/tavo-studio",
-    "/Users/<user>/.agents/skills/zhimengren",
-    "/Users/<user>/.codex/skills/sillytavern-card-worldbook",
-    "/Users/<user>/Documents/Codex/.agents/skills/tavo-android-operator",
-    "/Users/<user>/Documents/Codex/.agents/skills/tavo-card-craft",
-    "/Users/<user>/Documents/Codex/.agents/skills/tavo-card-studio-verified",
-    "/Users/<user>/Documents/Codex/.agents/skills/tavo-studio",
-]
-
-
-FORBIDDEN = re.compile("|".join(["TO" + "DO", "place" + "holder", r"\[" + "TO" + "DO"]))
-
-
-def rel(path: Path, root: Path) -> str:
-    return path.relative_to(root).as_posix()
+FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
+NAME_RE = re.compile(r"^name:\s*([^\s]+)\s*$", re.MULTILINE)
+RELATIVE_LINK_RE = re.compile(r"`((?:references|scripts|assets)/[^`]+)`")
+LEGACY_TRIGGER_RE = re.compile(re.escape("$" + "tavo") + r"(?!-skill)\b")
+DEFAULT_PROMPT_TRIGGER_RE = re.compile(
+    r"^\s+default_prompt:\s*[^\n]*" + re.escape("$tavo-skill") + r"[^\n]*$", re.MULTILINE
+)
+INITIALIZATION_REMNANT_RE = re.compile(r"^\s*(?:TODO|TBD)(?:\s|:|$)|\[TODO\]", re.IGNORECASE | re.MULTILINE)
 
 
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+def relative(path: Path, root: Path) -> str:
+    return path.relative_to(root).as_posix()
+
+
+def distributable_files(root: Path) -> list[Path]:
+    return sorted(
+        path
+        for path in root.rglob("*")
+        if path.is_file()
+        and ".git" not in path.parts
+        and "__pycache__" not in path.parts
+        and path.suffix not in {".pyc", ".pyo"}
+    )
+
+
+def distributable_entries(root: Path) -> list[Path]:
+    return sorted(
+        path
+        for path in root.rglob("*")
+        if ".git" not in path.relative_to(root).parts
+    )
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Audit Tavo skill skeleton.")
+    parser = argparse.ArgumentParser(description="Audit the community Tavo skill skeleton.")
     parser.add_argument("skill_dir", nargs="?", default=Path(__file__).resolve().parents[1])
     args = parser.parse_args()
-    skill_dir = Path(args.skill_dir).expanduser().resolve()
+    root = Path(args.skill_dir).expanduser().resolve()
 
     errors: list[str] = []
-    skill_md = skill_dir / "SKILL.md"
-    refs_dir = skill_dir / "references"
-    scripts_dir = skill_dir / "scripts"
-    url_map = refs_dir / "01-official-url-map.md"
+    skill_md = root / "SKILL.md"
+    agent_yaml = root / "agents/openai.yaml"
+    refs_dir = root / "references"
+    scripts_dir = root / "scripts"
+    assets_dir = root / "assets"
 
-    if not skill_md.exists():
-        errors.append("SKILL.md is missing")
-    if not refs_dir.is_dir():
-        errors.append("references/ is missing")
-    if not scripts_dir.is_dir():
-        errors.append("scripts/ is missing")
+    for required in (skill_md, agent_yaml, refs_dir, scripts_dir, assets_dir):
+        if not required.exists():
+            errors.append(f"missing required path: {relative(required, root)}")
 
-    searchable_parts: list[str] = []
-    for path in [skill_md, url_map]:
-        if path.exists():
-            searchable_parts.append(read_text(path))
-    skill_and_url_map = "\n".join(searchable_parts)
+    skill_text = read_text(skill_md) if skill_md.is_file() else ""
+    frontmatter = FRONTMATTER_RE.search(skill_text)
+    if not frontmatter:
+        errors.append("SKILL.md must begin with YAML frontmatter")
+    else:
+        name_match = NAME_RE.search(frontmatter.group(1))
+        if not name_match or name_match.group(1) != "tavo-skill":
+            errors.append("SKILL.md frontmatter name must be tavo-skill")
 
-    all_md_text = []
-    for path in [skill_md, *sorted(refs_dir.rglob("*.md"))] if refs_dir.exists() else [skill_md]:
-        if path.exists():
-            text = read_text(path)
-            all_md_text.append(text)
-            if FORBIDDEN.search(text):
-                errors.append(f"initialization remnant found in {rel(path, skill_dir)}")
+    agent_text = read_text(agent_yaml) if agent_yaml.is_file() else ""
+    if not DEFAULT_PROMPT_TRIGGER_RE.search(agent_text):
+        errors.append("agents/openai.yaml default_prompt must include $tavo-skill")
 
-    if refs_dir.exists():
-        for path in sorted(refs_dir.rglob("*.md")):
-            relative = rel(path, skill_dir)
-            if relative not in skill_and_url_map:
-                errors.append(f"reference not indexed by SKILL.md or 01-official-url-map.md: {relative}")
+    all_entries = distributable_entries(root) if root.exists() else []
+    for path in all_entries:
+        if path.is_symlink():
+            errors.append(f"symlinks are not allowed in the package: {relative(path, root)}")
 
-    all_reference_text = "\n".join(all_md_text)
-    if scripts_dir.exists():
-        for path in sorted(p for p in scripts_dir.rglob("*") if p.is_file()):
-            relative = rel(path, skill_dir)
-            if "__pycache__" in path.parts or path.suffix in {".pyc", ".pyo"}:
+    all_files = distributable_files(root) if root.exists() else []
+    for path in all_files:
+        text = read_text(path) if path.suffix.lower() in {".md", ".yaml", ".yml", ".py", ".js", ".mjs", ".json", ".html"} else ""
+        rel_path = relative(path, root)
+        if text and LEGACY_TRIGGER_RE.search(text):
+            errors.append(f"legacy trigger found: {rel_path}")
+        if path.suffix.lower() in {".md", ".yaml", ".yml"} and INITIALIZATION_REMNANT_RE.search(text):
+            errors.append(f"initialization remnant found: {rel_path}")
+
+    indexed_text = skill_text
+    reference_files = sorted(refs_dir.rglob("*.md")) if refs_dir.is_dir() else []
+    for path in reference_files:
+        rel = relative(path, root)
+        if rel not in indexed_text:
+            errors.append(f"reference not indexed by SKILL.md: {rel}")
+
+    reference_text = "\n".join(read_text(path) for path in reference_files)
+    script_files = sorted(path for path in scripts_dir.iterdir() if path.is_file()) if scripts_dir.is_dir() else []
+    for path in script_files:
+        rel = relative(path, root)
+        if rel not in skill_text and rel not in reference_text:
+            errors.append(f"script not explained by SKILL.md or references: {rel}")
+
+    for owner in [skill_md, *reference_files]:
+        if not owner.is_file():
+            continue
+        for linked in RELATIVE_LINK_RE.findall(read_text(owner)):
+            clean = linked.split("#", 1)[0]
+            if any(token in clean for token in ("<", ">", "*")):
                 continue
-            if relative not in all_reference_text:
-                errors.append(f"script not explained by SKILL.md or references: {relative}")
-
-    for old_path in OLD_SKILL_PATHS:
-        resolved = Path(old_path).resolve()
-        if resolved == skill_dir or skill_dir in resolved.parents:
-            errors.append(f"old-skill path points inside new skill: {old_path}")
-        # Historical skills are optional inputs, not dependencies of the new skill.
-        # Their absence must not make the canonical skill invalid.
+            target = root / clean
+            if not target.exists():
+                errors.append(f"broken relative path in {relative(owner, root)}: {clean}")
 
     if errors:
-        for error in errors:
+        for error in sorted(set(errors)):
             print(f"ERROR: {error}", file=sys.stderr)
         return 1
 
     print("audit_skill_skeleton_ok")
-    print(f"references={len(list(refs_dir.rglob('*.md')))}")
-    print(
-        "scripts="
-        + str(
-            len(
-                [
-                    path
-                    for path in scripts_dir.rglob("*")
-                    if path.is_file() and "__pycache__" not in path.parts and path.suffix not in {".pyc", ".pyo"}
-                ]
-            )
-        )
-    )
+    print(f"references={len(reference_files)}")
+    print(f"scripts={len(script_files)}")
+    print(f"assets={len([path for path in assets_dir.rglob('*') if path.is_file()])}")
     return 0
 
 

@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Validate local Tavo skill artifacts with deterministic stdlib checks."""
+"""Validate community Tavo artifacts with deterministic stdlib checks."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import re
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -16,59 +15,14 @@ from tpg_spec2 import (
     validate_manifest_semantics,
 )
 
+
 SECRET_RE = re.compile(
-    r"(Bearer\s+[A-Za-z0-9._~+/=-]{4,}|sk-[A-Za-z0-9]{12,}|AIza[0-9A-Za-z_-]{20,}|api[_-]?key['\"]?\s*[:=]\s*['\"][^'\"]{8,})",
+    r"(?:Bearer\s+(?!<(?:redacted|token)>)[A-Za-z0-9._~+/=-]{8,}|"
+    r"sk-(?!EXAMPLE|TEST|REDACTED)[A-Za-z0-9_-]{16,}|"
+    r"AIza[0-9A-Za-z_-]{20,}|"
+    r"api[_-]?key['\"]?\s*[:=]\s*['\"](?!<(?:redacted|secret)>)[^'\"]{8,})",
     re.IGNORECASE,
 )
-
-REGISTRY_SCHEMA_VERSIONS = {"1.0.0"}
-REGISTRY_VERDICTS = {
-    "verified",
-    "mixed",
-    "official-only",
-    "runtime-only",
-    "probable",
-    "workaround",
-    "blocked",
-    "deprecated",
-}
-EVIDENCE_TIERS = {
-    "official-current",
-    "mcp-runtime",
-    "schema-seen",
-    "dry-run-pass",
-    "roundtrip-pass",
-    "semantic-pass",
-    "semantic-pass-observation",
-    "ui-pass",
-    "live-verified",
-    "live-verified-regression",
-    "semantic-mixed",
-    "historical-derived",
-    "deprecated",
-}
-LIVE_EVIDENCE_TIERS = {
-    "dry-run-pass",
-    "roundtrip-pass",
-    "semantic-pass",
-    "semantic-pass-observation",
-    "ui-pass",
-    "live-verified",
-    "live-verified-regression",
-    "semantic-mixed",
-}
-MANIFEST_STATUSES = {
-    "planned",
-    "prepared",
-    "running",
-    "passed",
-    "failed",
-    "blocked",
-    "failed_runner_or_infrastructure",
-    "failed_product_behavior",
-}
-CLAIM_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def load_json(path: Path) -> Any:
@@ -80,6 +34,24 @@ def require(condition: bool, message: str, errors: list[str]) -> None:
         errors.append(message)
 
 
+def validate_character_book(data: Any, errors: list[str]) -> None:
+    require(isinstance(data, dict), "character_book must be an object", errors)
+    if not isinstance(data, dict):
+        return
+    entries = data.get("entries")
+    require(isinstance(entries, list), "character_book.entries must be an array", errors)
+    if not isinstance(entries, list):
+        return
+    for index, entry in enumerate(entries):
+        require(isinstance(entry, dict), f"character_book.entries[{index}] must be an object", errors)
+        if isinstance(entry, dict):
+            require(
+                isinstance(entry.get("content"), str) and bool(entry["content"].strip()),
+                f"character_book.entries[{index}].content must be non-empty",
+                errors,
+            )
+
+
 def validate_card(data: dict[str, Any], errors: list[str]) -> None:
     require(data.get("spec") == "chara_card_v2", "card spec must be chara_card_v2", errors)
     require(str(data.get("spec_version", "")).startswith("2."), "card spec_version must start with 2.", errors)
@@ -87,23 +59,14 @@ def validate_card(data: dict[str, Any], errors: list[str]) -> None:
     require(isinstance(card, dict), "card data must be an object", errors)
     if not isinstance(card, dict):
         return
-    for key in ["name", "description", "first_mes"]:
-        require(isinstance(card.get(key), str) and bool(card.get(key).strip()), f"card data.{key} must be a non-empty string", errors)
+    for key in ("name", "description", "first_mes"):
+        require(
+            isinstance(card.get(key), str) and bool(card[key].strip()),
+            f"card data.{key} must be a non-empty string",
+            errors,
+        )
     if "character_book" in card:
         validate_character_book(card["character_book"], errors)
-
-
-def validate_character_book(data: Any, errors: list[str]) -> None:
-    require(isinstance(data, dict), "character_book must be an object", errors)
-    if not isinstance(data, dict):
-        return
-    entries = data.get("entries")
-    require(isinstance(entries, list), "character_book.entries must be an array", errors)
-    if isinstance(entries, list):
-        for index, entry in enumerate(entries):
-            require(isinstance(entry, dict), f"character_book.entries[{index}] must be an object", errors)
-            if isinstance(entry, dict):
-                require(isinstance(entry.get("content"), str) and bool(entry["content"].strip()), f"character_book.entries[{index}].content must be non-empty", errors)
 
 
 def validate_worldbook(data: dict[str, Any], errors: list[str]) -> None:
@@ -115,22 +78,29 @@ def validate_worldbook(data: dict[str, Any], errors: list[str]) -> None:
     for index, entry in enumerate(iterable):
         require(isinstance(entry, dict), f"worldbook entry {index} must be an object", errors)
         if isinstance(entry, dict):
-            require(isinstance(entry.get("content"), str) and bool(entry["content"].strip()), f"worldbook entry {index} content must be non-empty", errors)
+            require(
+                isinstance(entry.get("content"), str) and bool(entry["content"].strip()),
+                f"worldbook entry {index} content must be non-empty",
+                errors,
+            )
 
 
 def validate_regex_fixture(data: dict[str, Any], errors: list[str]) -> None:
-    require(isinstance(data.get("rules"), list) and bool(data["rules"]), "regex fixture rules must be a non-empty array", errors)
-    require(isinstance(data.get("cases"), list) and bool(data["cases"]), "regex fixture cases must be a non-empty array", errors)
-    for rule in data.get("rules", []):
+    rules = data.get("rules")
+    cases = data.get("cases")
+    require(isinstance(rules, list) and bool(rules), "regex fixture rules must be a non-empty array", errors)
+    require(isinstance(cases, list) and bool(cases), "regex fixture cases must be a non-empty array", errors)
+    for rule in rules if isinstance(rules, list) else []:
         if not isinstance(rule, dict):
             errors.append("regex rule must be an object")
             continue
+        rule_id = rule.get("id", "<unknown>")
         require(isinstance(rule.get("id"), str) and bool(rule["id"]), "regex rule id is required", errors)
-        require(isinstance(rule.get("pattern"), str), f"regex rule {rule.get('id', '<unknown>')} pattern must be a string", errors)
+        require(isinstance(rule.get("pattern"), str), f"regex rule {rule_id} pattern must be a string", errors)
         try:
             re.compile(rule.get("pattern", ""))
         except re.error as exc:
-            errors.append(f"regex rule {rule.get('id', '<unknown>')} does not compile in Python fixture runner: {exc}")
+            errors.append(f"regex rule {rule_id} does not compile in the fixture runner: {exc}")
 
 
 def is_safe_package_path(value: Any) -> bool:
@@ -138,8 +108,6 @@ def is_safe_package_path(value: Any) -> bool:
 
 
 def resolve_tpg_entry(data: dict[str, Any]) -> tuple[str | None, Any]:
-    """Resolve the current entry declaration, with the legacy alias as fallback."""
-
     if "entry" in data:
         return "entry", data.get("entry")
     scripts = data.get("scripts")
@@ -148,114 +116,26 @@ def resolve_tpg_entry(data: dict[str, Any]) -> tuple[str | None, Any]:
     return None, None
 
 
-def validate_tpg_manifest(
-    data: dict[str, Any],
-    errors: list[str],
-    *,
-    plugin_root: Path | None = None,
-) -> None:
+def validate_tpg_manifest(data: dict[str, Any], errors: list[str], *, plugin_root: Path | None = None) -> None:
     analysis = validate_manifest_semantics(data, errors)
-    input_actions = analysis.input_actions
-    sidebar = analysis.sidebar_actions
-
     source, _ = resolve_tpg_entry(data)
-    if input_actions or sidebar:
+    if analysis.input_actions or analysis.sidebar_actions:
         require(
             source is not None,
             "plugin entry is required for inputActions/sidebar (legacy scripts.actions is accepted)",
             errors,
         )
-
     if plugin_root is not None:
         validate_localization_catalogs(plugin_root, analysis, errors)
 
 
-def validate_registry(data: dict[str, Any], errors: list[str]) -> None:
-    require(data.get("schemaVersion") in REGISTRY_SCHEMA_VERSIONS, "registry schemaVersion must be 1.0.0", errors)
-    require(isinstance(data.get("sourcePolicy"), str) and bool(data["sourcePolicy"].strip()), "registry sourcePolicy is required", errors)
-    claims = data.get("claims")
-    require(isinstance(claims, list) and bool(claims), "registry claims must be a non-empty array", errors)
-    required = [
-        "claim_id",
-        "topic",
-        "verdict",
-        "evidence_tier",
-        "official_source",
-        "mcp_source",
-        "live_artifact",
-        "app_version",
-        "last_verified",
-        "retention",
-        "staleness_policy",
-        "notes",
-    ]
-    seen_ids: set[str] = set()
-    for index, claim in enumerate(claims or []):
-        require(isinstance(claim, dict), f"registry claim {index} must be an object", errors)
-        if isinstance(claim, dict):
-            for key in required:
-                require(isinstance(claim.get(key), str), f"registry claim {index} {key} must be a string", errors)
-            claim_id = claim.get("claim_id", "")
-            require(bool(CLAIM_ID_RE.fullmatch(claim_id)), f"registry claim {index} has invalid claim_id", errors)
-            require(claim_id not in seen_ids, f"registry claim id is duplicated: {claim_id}", errors)
-            seen_ids.add(claim_id)
-            require(bool(str(claim.get("topic", "")).strip()), f"registry claim {index} topic is required", errors)
-            require(claim.get("verdict") in REGISTRY_VERDICTS, f"registry claim {index} has unknown verdict {claim.get('verdict')!r}", errors)
-            tier = claim.get("evidence_tier")
-            require(tier in EVIDENCE_TIERS, f"registry claim {index} has unknown evidence_tier {tier!r}", errors)
-            require(bool(str(claim.get("retention", "")).strip()), f"registry claim {index} retention is required", errors)
-            require(bool(str(claim.get("staleness_policy", "")).strip()), f"registry claim {index} staleness_policy is required", errors)
-            require(bool(str(claim.get("notes", "")).strip()), f"registry claim {index} notes are required", errors)
-            sources = [claim.get("official_source", ""), claim.get("mcp_source", ""), claim.get("live_artifact", "")]
-            require(any(isinstance(value, str) and value.strip() for value in sources), f"registry claim {index} has no evidence source", errors)
-            if tier in LIVE_EVIDENCE_TIERS:
-                require(bool(str(claim.get("app_version", "")).strip()), f"registry claim {index} live evidence requires app_version", errors)
-                last_verified = str(claim.get("last_verified", ""))
-                require(bool(ISO_DATE_RE.fullmatch(last_verified)), f"registry claim {index} live evidence requires ISO last_verified", errors)
-
-
-def validate_validation_manifest(data: dict[str, Any], errors: list[str]) -> None:
-    for key in ("case", "status", "startedAt"):
-        require(isinstance(data.get(key), str) and bool(data[key].strip()), f"validation manifest {key} is required", errors)
-    status = data.get("status")
-    require(status in MANIFEST_STATUSES, f"validation manifest has unknown status {status!r}", errors)
-    if "evidenceLevel" in data:
-        require(data.get("evidenceLevel") in EVIDENCE_TIERS | {"claimed", "needs-live-verify"}, "validation manifest has unknown evidenceLevel", errors)
-    else:
-        require(isinstance(data.get("countsTowardKpi"), bool), "legacy validation manifest without evidenceLevel must include countsTowardKpi", errors)
-    artifacts = data.get("artifacts")
-    require(isinstance(artifacts, list) and bool(artifacts), "validation manifest artifacts must be a non-empty array", errors)
-    if isinstance(artifacts, list):
-        require(all(isinstance(item, str) and item.strip() for item in artifacts), "validation manifest artifacts must contain non-empty strings", errors)
-    if status == "passed":
-        require(isinstance(data.get("finishedAt"), str) and bool(data["finishedAt"].strip()), "passed validation manifest requires finishedAt", errors)
-    if data.get("countsTowardKpi") is True:
-        require(status == "passed", "countsTowardKpi=true requires status=passed", errors)
-        require(isinstance(data.get("progress"), dict), "countsTowardKpi=true requires progress evidence", errors)
-
-
-def validate_mcp_surface(data: dict[str, Any], errors: list[str]) -> None:
-    for key in ["dumped_at", "endpoint", "calls"]:
-        require(key in data, f"mcp surface missing {key}", errors)
-    endpoint = data.get("endpoint", {})
-    if isinstance(endpoint, dict):
-        require(endpoint.get("auth") in {"", "<redacted>"}, "mcp endpoint auth must be empty or <redacted>", errors)
-
-
 def scan_secret_text(path: Path, errors: list[str]) -> None:
-    text = path.read_text(encoding="utf-8", errors="replace")
-    if SECRET_RE.search(text):
+    if SECRET_RE.search(path.read_text(encoding="utf-8", errors="replace")):
         errors.append(f"possible secret found in {path}")
 
 
 def infer_kind(path: Path, data: Any) -> str:
     name = path.name.lower()
-    if name.endswith("registry.json"):
-        return "registry"
-    if name == "mcp_surface.json":
-        return "mcp-surface"
-    if name == "run-manifest.json":
-        return "validation-manifest"
     if "regex" in name:
         return "regex-fixture"
     if "worldbook" in name or "lorebook" in name:
@@ -284,22 +164,13 @@ def validate(path: Path, kind: str | None) -> list[str]:
     elif selected == "tpg-manifest":
         require(path.name == "manifest.json", "Tavo plugin manifest filename must be manifest.json", errors)
         validate_tpg_manifest(data, errors, plugin_root=path.parent)
-    elif selected == "registry":
-        validate_registry(data, errors)
-    elif selected == "mcp-surface":
-        validate_mcp_surface(data, errors)
-    elif selected == "validation-manifest":
-        validate_validation_manifest(data, errors)
     return errors
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate local Tavo artifacts.")
     parser.add_argument("paths", nargs="+")
-    parser.add_argument(
-        "--kind",
-        choices=["card", "worldbook", "regex-fixture", "tpg-manifest", "registry", "mcp-surface", "validation-manifest", "json"],
-    )
+    parser.add_argument("--kind", choices=["card", "worldbook", "regex-fixture", "tpg-manifest", "json"])
     args = parser.parse_args()
 
     failures = 0
@@ -307,7 +178,7 @@ def main() -> int:
         path = Path(raw).expanduser()
         try:
             errors = validate(path, args.kind)
-        except Exception as exc:  # noqa: BLE001 - validator should report all bad inputs as failures
+        except Exception as exc:  # noqa: BLE001 - report malformed inputs as validation failures
             errors = [str(exc)]
         if errors:
             failures += 1

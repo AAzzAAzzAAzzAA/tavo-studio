@@ -1,6 +1,6 @@
 {
-  "id": "codex.validation.dangerous-path",
-  "name": "Codex Dangerous Path Fixture",
+  "id": "community.validation.dangerous-path",
+  "name": "Community Dangerous Path Fixture",
   "version": "0.92.0",
   "entry": "../escape.js",
   "cover": "/tmp/external-cover.png",

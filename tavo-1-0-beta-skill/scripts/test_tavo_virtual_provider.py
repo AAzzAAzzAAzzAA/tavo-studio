@@ -583,7 +583,7 @@ class VirtualProviderTests(unittest.TestCase):
             "Args",
             (),
             {
-                "port": 18793,
+                "port": 0,
                 "slow_seconds": 0.1,
                 "allowed_client": [],
                 "bind": "0.0.0.0",
@@ -600,8 +600,8 @@ class VirtualProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Non-loopback"):
             provider.build_config(args)
         self.assertEqual(
-            str(provider.validate_allowed_clients(["192.168.0.0/24"])[0]),
-            "192.168.0.0/24",
+            str(provider.validate_allowed_clients(["192.0.2.0/24"])[0]),
+            "192.0.2.0/24",
         )
 
 

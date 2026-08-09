@@ -1,6 +1,6 @@
 {
-  "id": "codex.validation.hook-only",
-  "name": "Codex Hook Only Fixture",
+  "id": "community.validation.hook-only",
+  "name": "Community Hook Only Fixture",
   "version": "0.92.0",
   "entry": "entry.js",
   "permissions": ["input"]

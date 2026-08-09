@@ -1,5 +1,5 @@
 {
-  "name": "Codex Regex Cleanup Fixture",
+  "name": "Community Regex Cleanup Fixture",
   "rules": [
     {
       "id": "remove-ai-aside",

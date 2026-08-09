@@ -1,12 +1,12 @@
 {
-  "id": "codex.validation.minimal",
+  "id": "community.validation.minimal",
   "name": {
     "$t": "plugin.name"
   },
   "version": "0.1.0",
   "specVersion": 2,
   "minAppVersion": "0.93.0",
-  "author": "Codex",
+  "author": "Community",
   "description": {
     "$t": "plugin.description"
   },

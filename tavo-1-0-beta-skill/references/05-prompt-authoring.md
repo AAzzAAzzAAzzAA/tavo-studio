@@ -2,47 +2,32 @@
 
 This reference covers presets, worldbooks, regexes, long memory, and prompt architecture.
 
-## Official Pages
+## Prompt Layers
 
-- `https://docs.tavoai.dev/cn/guides/preset/`
-- `https://docs.tavoai.dev/cn/guides/lore-book/`
-- `https://docs.tavoai.dev/cn/guides/regular/`
-- `https://docs.tavoai.dev/cn/guides/long-memory/`
-- `https://docs.tavoai.dev/cn/guides/supported-macros/`
-- `https://docs.tavoai.dev/cn/guides/ejs-template/`
-
-## Official-Current Prompt Layers
-
-| Layer | What it controls | What it should not be treated as |
+| Layer | What it controls | Do not treat it as |
 | --- | --- | --- |
-| Preset | Reusable baseline configuration, role behavior, dialogue style, scenario framing, user relationship, group progression, continuation, and impersonation/help-answer prompts. | A concrete character biography or permanent lore database. |
-| Worldbook | Background encyclopedia and story guide injected behind the scenes when triggers/budget/scanning allow. | A guarantee the model will never forget or obey a fact. |
-| Regex | Text recognition, cleanup, replacement, formatting, and transformation across configured scopes/timings. | A state database or guaranteed JavaScript runner. |
-| Long memory | Cross-session retention of user preferences, habits, relationship facts, and important details via manual or automatic extraction. | A deterministic database recall promise. |
-| Macros | Dynamic macro tokens and variable operations inside role definitions, presets, worldbooks, regex, and other generation-prompt positions. | Universal execution in every display surface or file metadata field. |
-| EJS | Logic layer for prompt fields: conditions, loops, variable operations, and macro-producing templates. | Full Node/browser EJS with include/partial/custom delimiters. |
+| Preset | Reusable system behavior, output rules, prompt order, style, scenario framing, group progression, continuation, and helper prompts. | A specific character biography or lore database. |
+| Worldbook | Conditional or constant background injected when trigger, scan, probability, and budget rules allow. | A guarantee that the model always recalls or obeys a fact. |
+| Regex | Recognition, cleanup, replacement, formatting, and transformations at configured placements and timings. | A state database or guaranteed JavaScript runner. |
+| Long memory | Retention of user preferences, habits, relationship facts, and important details through manual or automatic extraction. | Deterministic database recall. |
+| Macros | Dynamic tokens and compact variable operations in prompt-bearing positions. | Universal execution in every display surface or metadata field. |
+| EJS | Prompt logic using conditions, loops, variable operations, and macro-producing templates. | Full Node/browser EJS with include, partial, or custom delimiters. |
 
 ## Presets
 
-Official docs frame presets as reusable behavior and prompt structures. They can define:
+Presets can define reusable behavior for:
 
-- user identity relationship;
-- character identity/background;
-- personality traits;
-- scenario;
-- new example chat;
-- new chat behavior;
-- group chat progression;
-- continuation behavior;
-- impersonation/help-answer prompt behavior.
+- user/character relationship framing;
+- character behavior and dialogue style;
+- scenario handling;
+- new-chat and example-chat behavior;
+- group-chat progression;
+- continuation;
+- impersonation or helper-answer generation.
 
-Current TavoJS docs expose a preset object shape with:
+The TavoJS preset object uses `basicPrompts` and `entries`. Entries can contain identifier, name, content, enabled/active state, type, role, injection position, and injection depth.
 
-- `basicPrompts`;
-- `entries`;
-- entry-level fields such as identifier/name/content/enabled/active/type/role/injection position/injection depth.
-
-Official-current built-in identifiers include:
+Built-in prompt identifiers include:
 
 - `main`
 - `worldInfoBefore`
@@ -57,105 +42,80 @@ Official-current built-in identifiers include:
 - `chatHistory`
 - `jailbreak`
 
-Historical-derived guidance that is safe to reuse:
-
-- Use presets for system-level behavior and output rules, not for every character-specific fact.
-- Keep character identity facts in the card unless a preset is intentionally shared by a family of characters.
-- Use presets to decide how card fields, persona, worldbook, and history are assembled into a generation request.
+Use presets for system-level behavior and assembly rules. Keep character-specific identity facts in the card unless the preset is deliberately shared by a family of characters.
 
 ## Worldbooks
 
-Official-current purpose:
+Worldbooks maintain setting consistency, keep narrative focus, and reveal large settings through constant or triggered entries. Entry content is injected into the prompt; it does not normally appear as its own visible user message.
 
-- maintain world consistency;
-- keep narrative focus;
-- gradually reveal large settings through triggered entries.
-
-Official examples emphasize trigger words and content entries. Current docs say worldbooks work behind the scenes; entries do not simply appear as user-visible messages.
-
-Historical-derived guidance that is safe to reuse:
-
-- Write entry `content` so it stands alone. Do not rely on title, key, or comment being injected.
-- Use short, precise trigger terms plus common aliases.
-- Split large lore into small entries by use case: location, faction, rule, secret, relationship, timeline, object.
-- Worldbooks are best for stable objective facts and conditional background, not for current emotional state or output style.
-- Competing entries, insertion order, recursion, and budget behavior need live validation before exact claims.
-
-Current TavoJS docs expose worldbook fields including:
+Important fields include:
 
 - `strategy`: `constant` or `keyword`;
-- `keywords`;
-- `secondaryKeywords`;
+- `keywords` and `secondaryKeywords`;
 - `secondaryKeywordStrategy`;
 - `scanDepth`;
-- `caseSensitive`;
-- `matchWholeWord`;
-- `injectionPosition`;
-- `injectionDepth`;
-- `injectionRole`;
+- `caseSensitive` and `matchWholeWord`;
+- `injectionPosition`, `injectionDepth`, and `injectionRole`;
 - `probability`;
-- `sticky`;
-- `cooldown`;
-- `delay`.
+- `sticky`, `cooldown`, and `delay`.
 
-Official/TavoJS docs also document compatibility mappings from CC-style fields such as keys, secondary keys, constant/selective flags, and insertion position. Use these as guidance only; exact import/export conversion should still be checked through current dry-run or exports.
+Authoring rules:
+
+- Make each entry's `content` understandable on its own; title, keys, and comments may not be injected.
+- Use precise triggers plus likely aliases, inflections, and names.
+- Split large lore by function: location, faction, rule, secret, relationship, timeline, object.
+- Put stable objective facts and conditional background here, not transient emotion or global output style.
+- Avoid multiple entries that compete to restate the same fact.
+- Treat CC-style keys, selective flags, and insertion positions as compatibility inputs; confirm the converted Tavo object after import.
 
 ## Regex
 
-Official-current use cases:
+Regex can identify patterns, replace or trim text, clean formatting, and transform configured user, character, reasoning, or lorebook content. Timings include display, send, send-and-display, receive, and edit-and-receive paths. Substitution can be none/raw/escaped and may be limited by depth.
 
-- identify text patterns;
-- modify or replace text;
-- clean redundant characters or formatting;
-- use built-in regex assistant templates for categories such as reasoning, quote, narration, markdown code block, and tag-style text;
-- configure name, find regex, replacement, trim-out, scope, and execution timing.
+Use regex for:
 
-Historical-derived guidance that is safe to reuse:
-
-- Regex can produce text, macros, or HTML, but whether later systems execute those outputs depends on timing and downstream processing.
-- Do not treat regex import object fields as identical to TavoJS regex object fields; file import format must be checked through current exports/import tools.
-- Use regex for cleanup, shorthand expansion, status display formatting, and guarded transformations.
-- Avoid destructive regexes unless the before/after behavior has test fixtures.
-
-Current TavoJS docs expose regex object concepts including:
-
-- placements such as user, character, reasoning, and lorebook contexts;
-- timing such as display, send, send-and-display, receive, and edit-and-receive paths;
-- substitution modes such as none/raw/escaped;
-- optional depth ranges.
-
-Official docs also describe regex assistant templates for reasoning, quote, narration, markdown code block, and tag-like text.
-
-## Long Memory
-
-Official-current behavior:
-
-- long memory can preserve user preferences, interests, habits, and important details across future conversations;
-- it has management controls so users can decide what is saved and when;
-- docs describe manual extraction and automatic extraction after 10 conversation turns/messages as distinct mechanisms.
+- cleanup and normalization;
+- shorthand expansion;
+- status-display formatting;
+- guarded transformation of known tags or blocks;
+- assistant templates for reasoning, quotes, narration, Markdown code blocks, and tag-like text.
 
 Boundaries:
 
-- Do not promise every saved fact will always be recalled.
-- Do not use long memory for static world rules that belong in card/worldbook.
-- Treat extraction quality and injection timing as model/runtime-dependent until verified.
+- Regex output may contain text, macros, or HTML, but downstream timing determines whether a later engine expands or renders it.
+- Import-object fields and TavoJS regex-object fields are not necessarily identical.
+- Avoid destructive expressions without before/after fixtures and a rollback copy.
+- Keep state mutation separate from display formatting.
 
-Current TavoJS docs describe current-chat memory as an enabled flag plus a list of memory strings. Treat automatic extraction, injection position, deletion/merge strategy, and cross-chat behavior as `needs-live-verify`.
+## Long Memory
 
-External MCP 1.0 adds `tavo_memory_get`, `tavo_memory_update`, and `tavo_memory_append`. The append path is `roundtrip-pass` for these exact semantics:
+Long memory can retain user preferences, interests, habits, relationship details, and other important information across future conversations. Users can manage what is saved. Manual extraction and automatic extraction after roughly ten conversation turns/messages are separate mechanisms.
 
-- dry run validates without persistence;
-- sequential appends preserve the submitted part order;
-- replaying the same `clientRequestId` does not duplicate content;
-- a stale `expectedRevision` fails without mutation;
-- cleanup can restore the original enabled flag and content exactly.
+TavoJS represents current-chat memory as an enabled flag plus a list of memory strings. In Tavo 1.0, external MCP exposes get, update, and append operations. Append supports validation without persistence, ordered sequential parts, idempotent `clientRequestId`, and revision checks through `expectedRevision`.
 
-These results prove explicit memory storage operations, not automatic extraction quality, prompt injection timing, cross-chat recall, or semantic usefulness. Read `references/28-tavo-100-live-evidence.md` for the versioned case boundary.
+Boundaries:
+
+- Explicit storage does not prove that automatic extraction chose the right facts.
+- Saved memory does not guarantee recall in every response.
+- Injection timing, merge/deletion behavior, and cross-chat usefulness remain runtime- and model-dependent.
+- Static world rules belong in the card or worldbook, not long memory.
+- Do not silently convert guesses into memory; distinguish observed facts from interpretation.
+
+## Prompt Assembly Validation
+
+1. Lock the test inputs: preset, card, persona, worldbook, regex set, history, and current user message.
+2. Use Prompt Lab to assemble the request in Tavo order and inspect the resulting roles and prompt blocks.
+3. Test a baseline with no conditional trigger, then one primary keyword, a secondary-key condition, and a non-trigger near miss.
+4. Test probability, sticky, cooldown, delay, scan depth, case sensitivity, and whole-word matching separately rather than in one opaque scenario.
+5. Run regex at its actual placement/timing and compare raw, provider-facing, and display text.
+6. For multi-turn behavior, run one turn at a time. Inspect the model output before choosing the next user message.
+7. Stop when an upstream response succeeds but contains no usable text; do not silently manufacture an assistant message or continue the history.
+8. Never modify a supplied test preset or unrelated object to make a test pass. Change only the object the user commissioned.
 
 ## Authoring Standards
 
 - Prefer small, inspectable prompt components over monolithic blocks.
-- Make every worldbook entry answer why it exists, when it should fire, and what it must not override.
-- Keep regexes reversible where possible; document destructive replacements.
-- Separate style guidance from factual memory so future edits are safer.
-- Add validation rows in `references/12-validation-matrix.md` for any prompt behavior that depends on exact insertion order or runtime variable expansion.
+- Make each worldbook entry state why it exists, when it should fire, and what it must not override.
+- Keep regex transformations reversible where possible and document destructive replacements.
+- Separate style guidance, world facts, current state, and long-term memory.
+- Compare semantic behavior, not just the presence of marker words.

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Compile Tavo text assets and optionally call an OpenAI-compatible model.
 
-The lab is intentionally text-only.  It reproduces the prompt-assembly behavior
-supported by retained Tavo evidence, including isolated prompt-field EJS before
-macros, and reports known approximations instead of claiming full app equivalence.
+The lab is intentionally text-only. It implements the packaged prompt-assembly
+rules, including isolated prompt-field EJS before macros, and reports known
+approximations instead of claiming full app equivalence.
 """
 
 from __future__ import annotations
@@ -31,7 +31,10 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-FORMAT = "tavo-prompt-lab-result/v2"
+FORMAT = "tavo-prompt-lab-result/v2.3"
+STATE_FORMAT = "tavo-prompt-lab-state/v2.3"
+CASE_SCHEMA_VERSION = "2.3"
+LEGACY_CASE_SCHEMA_VERSIONS = frozenset({"2.1", "2.2"})
 DEFAULT_KEY_ENV = "TAVO_PROMPT_LAB_API_KEY"
 DEFAULT_BASE_URL_ENV = "TAVO_PROMPT_LAB_BASE_URL"
 DEFAULT_MODEL_ENV = "TAVO_PROMPT_LAB_MODEL"
@@ -43,13 +46,19 @@ MAX_TEXT_BYTES = 8 * 1024 * 1024
 MAX_WORLD_BOOKS = 128
 MAX_ENTRIES = 10_000
 MAX_HISTORY_MESSAGES = 10_000
+MAX_SESSION_TURNS = 64
+MAX_SESSION_BUDGET_BYTES = 64 * 1024 * 1024
 MAX_EJS_STATE_BYTES = 4 * 1024 * 1024
 MAX_EJS_TRACE_ITEMS = 10_000
 MAX_EJS_FIELDS = 512
 MAX_EJS_WALL_SECONDS = 30.0
+MAX_REGEX_GROUPS = 128
 DEFAULT_EJS_TIMEOUT_MS = 500
 MAX_EJS_TIMEOUT_MS = 2_000
 ROLES = frozenset({"system", "user", "assistant"})
+REGEX_PLACEMENTS = frozenset({"user", "char", "reasoning", "lorebook"})
+REGEX_TIMINGS = frozenset({"display", "send", "sendAndDisplay", "receive", "editAndReceive"})
+REGEX_SUBSTITUTIONS = frozenset({"none", "raw", "escaped"})
 RESERVED_PARAMETERS = frozenset({"model", "messages", "stream"})
 SENSITIVE_PARAMETER_KEYS = frozenset(
     {
@@ -67,6 +76,9 @@ SENSITIVE_PARAMETER_KEYS = frozenset(
         "token",
         "x_api_key",
     }
+)
+NORMALIZED_SENSITIVE_PARAMETER_KEYS = frozenset(
+    re.sub(r"[^a-z0-9]", "", key.lower()) for key in SENSITIVE_PARAMETER_KEYS
 )
 WORLD_POSITIONS = frozenset(
     {
@@ -95,6 +107,14 @@ class LabError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class ProviderResponseError(LabError):
+    """A provider failure with bounded, redacted response diagnostics."""
+
+    def __init__(self, code: str, message: str, diagnostic: dict[str, Any]) -> None:
+        super().__init__(code, message)
+        self.diagnostic = diagnostic
 
 
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -144,11 +164,59 @@ class AssemblyBudget:
 _MISSING = object()
 
 
+def reject_nonfinite_json(value: str) -> None:
+    raise ValueError(f"non-finite JSON number is not allowed: {value}")
+
+
+def strict_json_loads(value: str | bytes) -> Any:
+    return json.loads(value, parse_constant=reject_nonfinite_json)
+
+
+def strict_json_dumps(value: Any, **kwargs: Any) -> str:
+    try:
+        return json.dumps(value, allow_nan=False, **kwargs)
+    except (TypeError, ValueError) as error:
+        raise LabError("invalid_json_value", "value must contain only finite JSON data") from error
+
+
+def normalized_security_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value).lower())
+
+
+def error_payload(error: LabError) -> dict[str, Any]:
+    value: dict[str, Any] = {"code": error.code, "message": str(error)}
+    if isinstance(error, ProviderResponseError):
+        value["diagnostic"] = copy.deepcopy(error.diagnostic)
+    return value
+
+
+def case_schema_warnings(case: dict[str, Any]) -> list[WarningItem]:
+    version = case.get("schemaVersion")
+    if version is None:
+        return []
+    if not isinstance(version, str):
+        raise LabError("invalid_schema_version", "case.schemaVersion must be a string")
+    if version == CASE_SCHEMA_VERSION:
+        return []
+    if version in LEGACY_CASE_SCHEMA_VERSIONS:
+        return [
+            WarningItem(
+                "legacy_case_schema",
+                f"case.schemaVersion {version} is accepted for compatibility; outputs and new state files use {CASE_SCHEMA_VERSION}.",
+                "case.schemaVersion",
+            )
+        ]
+    raise LabError(
+        "unsupported_schema_version",
+        f"case.schemaVersion {version!r} is unsupported; expected {CASE_SCHEMA_VERSION}",
+    )
+
+
 def json_clone(value: Any, label: str) -> Any:
     try:
-        encoded = json.dumps(value, ensure_ascii=False, allow_nan=False)
-        return json.loads(encoded)
-    except (TypeError, ValueError) as error:
+        encoded = strict_json_dumps(value, ensure_ascii=False)
+        return strict_json_loads(encoded)
+    except (LabError, TypeError, ValueError) as error:
         raise LabError("invalid_ejs_state", f"{label} must contain only finite JSON values") from error
 
 
@@ -233,7 +301,7 @@ def macro_value_text(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        return strict_json_dumps(value, ensure_ascii=False, separators=(",", ":"))
     return str(value)
 
 
@@ -248,8 +316,8 @@ def parse_macro_value(value: str) -> Any:
             return float(stripped)
     if stripped[0] in '[{"' or stripped in {"true", "false", "null"}:
         try:
-            return json.loads(stripped)
-        except json.JSONDecodeError:
+            return strict_json_loads(stripped)
+        except (json.JSONDecodeError, ValueError):
             pass
     return stripped
 
@@ -358,7 +426,11 @@ class EjsRenderer:
         self.unresolved_sources.add(source)
         warnings.append(WarningItem(code, message, source))
         self._record_field(source, "fallback-original", text, text, error_kind=kind)
-        return text, False
+        # Tavo 1.0 keeps the whole authored field when EJS fails, rolls back
+        # that field's state mutations, and still runs the ordinary macro pass
+        # over the retained text.  The raw EJS source therefore remains visible
+        # while macros outside (or inside) it can still expand.
+        return text, True
 
     def render_ejs(
         self, text: str, warnings: list[WarningItem], source: str
@@ -385,7 +457,7 @@ class EjsRenderer:
                 warnings,
                 source,
                 code="ejs_budget_exhausted_fallback",
-                message="The per-case EJS field/time budget was exhausted; the complete field fell back to its original text.",
+                message="The per-case EJS field/time budget was exhausted; the complete field fell back to its original text and the ordinary macro pass continues.",
                 kind="limit",
             )
 
@@ -397,7 +469,7 @@ class EjsRenderer:
                 warnings,
                 source,
                 code="ejs_runtime_unavailable",
-                message="Sandboxed EJS requires Node.js and the bundled worker; the complete field fell back to its original text.",
+                message="Sandboxed EJS requires Node.js and the bundled worker; the complete field fell back to its original text and the ordinary macro pass continues.",
                 kind="unavailable",
             )
         request = {
@@ -433,7 +505,7 @@ class EjsRenderer:
             with tempfile.TemporaryDirectory(prefix="tavo-prompt-lab-ejs-") as working:
                 completed = subprocess.run(
                     command,
-                    input=json.dumps(request, ensure_ascii=False),
+                    input=strict_json_dumps(request, ensure_ascii=False),
                     text=True,
                     capture_output=True,
                     cwd=working,
@@ -447,7 +519,7 @@ class EjsRenderer:
                 warnings,
                 source,
                 code="ejs_timeout_fallback",
-                message="Sandboxed EJS exceeded its wall-clock limit; the complete field fell back to its original text and state changes were rolled back.",
+                message="Sandboxed EJS exceeded its wall-clock limit; the complete field fell back to its original text, state changes were rolled back, and the ordinary macro pass continues.",
                 kind="timeout",
             )
         except OSError as error:
@@ -456,7 +528,7 @@ class EjsRenderer:
                 warnings,
                 source,
                 code="ejs_worker_failure_fallback",
-                message=f"Sandboxed EJS could not start ({error.__class__.__name__}); the complete field fell back to its original text.",
+                message=f"Sandboxed EJS could not start ({error.__class__.__name__}); the complete field fell back to its original text and the ordinary macro pass continues.",
                 kind="worker",
             )
         if completed.returncode != 0 or len(completed.stdout.encode("utf-8")) > MAX_RESPONSE_BYTES:
@@ -465,18 +537,18 @@ class EjsRenderer:
                 warnings,
                 source,
                 code="ejs_worker_failure_fallback",
-                message="Sandboxed EJS ended without a bounded result; the complete field fell back to its original text.",
+                message="Sandboxed EJS ended without a bounded result; the complete field fell back to its original text and the ordinary macro pass continues.",
                 kind="worker",
             )
         try:
-            response = json.loads(completed.stdout)
-        except json.JSONDecodeError:
+            response = strict_json_loads(completed.stdout)
+        except (json.JSONDecodeError, ValueError):
             return self._fallback(
                 text,
                 warnings,
                 source,
                 code="ejs_worker_failure_fallback",
-                message="Sandboxed EJS returned invalid JSON; the complete field fell back to its original text.",
+                message="Sandboxed EJS returned invalid JSON; the complete field fell back to its original text and the ordinary macro pass continues.",
                 kind="worker",
             )
         if not isinstance(response, dict) or response.get("ok") is not True:
@@ -488,7 +560,7 @@ class EjsRenderer:
                 warnings,
                 source,
                 code="ejs_render_error_fallback",
-                message=f"Sandboxed EJS {kind} error; Tavo-style whole-field fallback was applied and state changes were rolled back: {detail}",
+                message=f"Sandboxed EJS {kind} error; Tavo-style whole-field fallback was applied, state changes were rolled back, and the ordinary macro pass continues: {detail}",
                 kind=kind,
             )
         output = response.get("output")
@@ -506,7 +578,7 @@ class EjsRenderer:
                 warnings,
                 source,
                 code="ejs_worker_failure_fallback",
-                message="Sandboxed EJS returned an invalid result shape; the complete field fell back to its original text.",
+                message="Sandboxed EJS returned an invalid result shape; the complete field fell back to its original text and the ordinary macro pass continues.",
                 kind="worker",
             )
         try:
@@ -518,7 +590,7 @@ class EjsRenderer:
                 warnings,
                 source,
                 code="ejs_result_limit_fallback",
-                message="Sandboxed EJS produced an invalid or excessive result; the complete field fell back and state changes were rolled back.",
+                message="Sandboxed EJS produced an invalid or excessive result; the complete field fell back, state changes were rolled back, and the ordinary macro pass continues.",
                 kind="limit",
             )
         if json_size(state) > MAX_EJS_STATE_BYTES:
@@ -527,7 +599,7 @@ class EjsRenderer:
                 warnings,
                 source,
                 code="ejs_state_too_large_fallback",
-                message="Sandboxed EJS produced excessive variable state; the complete field fell back and state changes were rolled back.",
+                message="Sandboxed EJS produced excessive variable state; the complete field fell back, state changes were rolled back, and the ordinary macro pass continues.",
                 kind="limit",
             )
         if self.ejs_operation_count + len(operations) > MAX_EJS_TRACE_ITEMS:
@@ -536,7 +608,7 @@ class EjsRenderer:
                 warnings,
                 source,
                 code="ejs_trace_limit_fallback",
-                message="Sandboxed EJS exceeded the per-case variable trace limit; the complete field fell back and state changes were rolled back.",
+                message="Sandboxed EJS exceeded the per-case variable trace limit; the complete field fell back, state changes were rolled back, and the ordinary macro pass continues.",
                 kind="limit",
             )
         self.state = state
@@ -670,7 +742,7 @@ def require_dict(value: Any, label: str) -> dict[str, Any]:
     return value
 
 
-def bounded_json(path: Path) -> Any:
+def bounded_json(path: Path, *, require_private: bool = False) -> Any:
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(path, flags)
@@ -684,6 +756,11 @@ def bounded_json(path: Path) -> Any:
         metadata = os.fstat(fd)
         if not stat.S_ISREG(metadata.st_mode):
             raise LabError("invalid_input", f"JSON input is not a regular file: {path}")
+        if require_private and metadata.st_mode & 0o077:
+            raise LabError(
+                "insecure_private_file",
+                f"private JSON input must have mode 0600: {path}",
+            )
         if metadata.st_size > MAX_JSON_BYTES:
             raise LabError("input_too_large", f"JSON input exceeds {MAX_JSON_BYTES} bytes: {path}")
         with os.fdopen(fd, "rb") as handle:
@@ -691,8 +768,10 @@ def bounded_json(path: Path) -> Any:
             raw = handle.read(MAX_JSON_BYTES + 1)
         if len(raw) > MAX_JSON_BYTES:
             raise LabError("input_too_large", f"JSON input exceeds {MAX_JSON_BYTES} bytes: {path}")
-        return json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        return strict_json_loads(raw.decode("utf-8"))
+    except LabError:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
         raise LabError("invalid_json", f"Cannot parse JSON input {path}: {error}") from error
     finally:
         if fd >= 0:
@@ -723,8 +802,8 @@ def unwrap_mcp_text(value: dict[str, Any]) -> dict[str, Any]:
             ]
             if len(text_blocks) == 1:
                 try:
-                    parsed = json.loads(text_blocks[0])
-                except json.JSONDecodeError:
+                    parsed = strict_json_loads(text_blocks[0])
+                except (json.JSONDecodeError, ValueError):
                     break
                 if isinstance(parsed, dict):
                     current = parsed
@@ -737,9 +816,9 @@ def normalize_prompt_order_preset(value: dict[str, Any]) -> dict[str, Any]:
     """Normalize the bounded Tavo-exported prompts/prompt_order subset.
 
     This adapter intentionally accepts only one unambiguous order and relative
-    entries.  The role mapping is backed by the retained Tavo 0.93 Whisper
-    provider capture: exported ``system_prompt: false`` entries become user
-    prompt components even when the compatibility ``role`` field says system.
+    entries. In the supported Tavo 0.93 compatibility mapping, exported
+    ``system_prompt: false`` entries become user prompt components even when the
+    compatibility ``role`` field says system.
     """
 
     prompts = value.get("prompts")
@@ -833,7 +912,7 @@ def normalize_prompt_order_preset(value: dict[str, Any]) -> dict[str, Any]:
         if isinstance(injection_position, bool) or injection_position != 0:
             raise LabError(
                 "unsupported_prompt_order_injection",
-                f"Tavo-exported prompt {identifier} uses an unverified non-relative injection_position",
+                f"Tavo-exported prompt {identifier} uses an unsupported non-relative injection_position",
             )
         injection_depth = prompt.get("injection_depth", 0)
         if isinstance(injection_depth, bool) or not isinstance(injection_depth, int) or injection_depth < 0:
@@ -1161,7 +1240,7 @@ def validate_int(value: Any, label: str, minimum: int, maximum: int | None = Non
 
 
 def json_size(value: Any) -> int:
-    return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+    return len(strict_json_dumps(value, ensure_ascii=False).encode("utf-8"))
 
 
 def ensure_text_budget(value: str, source: str) -> None:
@@ -1174,7 +1253,7 @@ def find_sensitive_parameter_paths(value: Any, path: str = "model.parameters") -
     if isinstance(value, dict):
         for key, child in value.items():
             child_path = f"{path}.{key}"
-            if str(key).lower() in SENSITIVE_PARAMETER_KEYS:
+            if normalized_security_key(key) in NORMALIZED_SENSITIVE_PARAMETER_KEYS:
                 found.append(child_path)
             found.extend(find_sensitive_parameter_paths(child, child_path))
     elif isinstance(value, list):
@@ -1265,7 +1344,12 @@ def evaluate_worldbooks(
                         source,
                     )
                 )
-            scan_messages = history[-scan_depth:] if scan_depth else []
+            # In the supported Tavo 1.0 scanDepth=2 behavior, current input
+            # consumes one depth slot and the immediately preceding visible
+            # message consumes the other. Depth=0 remains a current-input-only
+            # Prompt Lab approximation.
+            prior_message_count = max(0, scan_depth - 1) if scan_depth else 0
+            scan_messages = history[-prior_message_count:] if prior_message_count else []
             corpus = "\n".join([*(item["content"] for item in scan_messages), user_input])
             if entry["strategy"] == "keyword":
                 rendered_keywords = [
@@ -1325,7 +1409,7 @@ def evaluate_worldbooks(
                 warnings.append(
                     WarningItem(
                         "scan_depth_policy",
-                        "Prompt Lab v2 scans the current input plus scanDepth prior messages; Tavo has not published every counting edge case.",
+                        "Prompt Lab v2.3 counts the current input as one scanDepth slot and scans up to scanDepth-1 prior visible messages; scanDepth=0 still scans the current input as an explicit approximation.",
                         source,
                     )
                 )
@@ -1647,11 +1731,11 @@ def wrap_lorebook(content: str, wrapper: Any, warnings: list[WarningItem], sourc
         warnings.append(
             WarningItem(
                 "lorebook_wrapper_missing_slot",
-                "basicPrompts.lorebook has no {0}; v2 appends the lorebook content after it.",
+                "basicPrompts.lorebook has no {0}; live Tavo 1.0 renders the wrapper but drops the activated lorebook content.",
                 source,
             )
         )
-        return f"{wrapper}\n{content}"
+        return wrapper
     return wrapper.replace("{0}", content)
 
 
@@ -1687,12 +1771,14 @@ def add_chunk(
     content: str,
     budget: AssemblyBudget | None = None,
     source: str = "prompt",
+    *,
+    merge: bool = True,
 ) -> None:
     if not content:
         return
     if budget is not None:
         budget.add(content, source)
-    if messages and messages[-1]["role"] == role:
+    if merge and messages and messages[-1]["role"] == role:
         messages[-1]["content"] += "\n\n" + content
     else:
         messages.append({"role": role, "content": content})
@@ -1759,8 +1845,428 @@ def merge_adjacent(messages: Iterable[dict[str, str]]) -> list[dict[str, str]]:
     return result
 
 
+def apply_tavo_openai_role_adapter(
+    messages: Iterable[dict[str, str]],
+) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+    """Apply the supported Tavo 1.0 OpenAI-compatible role policy.
+
+    Keep the first leading system chunk as system, coerce later logical system
+    chunks to user, and then merge adjacent equal roles with two newlines. This
+    is limited to native Tavo presets; exported prompts+prompt_order uses its
+    separate Tavo 0.93 compatibility path.
+    """
+
+    normalized: list[dict[str, str]] = []
+    trace: list[dict[str, Any]] = []
+    for index, item in enumerate(messages):
+        source_role = item["role"]
+        adapter_role = source_role
+        if source_role == "system" and normalized:
+            adapter_role = "user"
+        trace.append(
+            {
+                "logicalIndex": index,
+                "sourceRole": source_role,
+                "adapterRole": adapter_role,
+                "coerced": adapter_role != source_role,
+            }
+        )
+        add_chunk(normalized, adapter_role, item["content"])
+    return normalized, trace
+
+
+def normalize_regex_groups(value: Any, base_dir: Path) -> list[dict[str, Any]]:
+    """Normalize the supported Tavo native regex shape."""
+
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise LabError("invalid_regexes", "case.regexes must be an array")
+    if len(value) > MAX_REGEX_GROUPS:
+        raise LabError("too_many_regexes", f"case.regexes exceeds {MAX_REGEX_GROUPS} groups")
+    groups: list[dict[str, Any]] = []
+    entry_count = 0
+    for group_index, source in enumerate(value):
+        group = unwrap_mcp_text(resolve_json(source, base_dir, f"regexes[{group_index}]"))
+        if isinstance(group.get("regex"), dict):
+            group = group["regex"]
+        name = group.get("name")
+        entries = group.get("entries", [])
+        if not isinstance(name, str) or not name:
+            raise LabError("invalid_regex", f"regexes[{group_index}].name must be a non-empty string")
+        if not isinstance(entries, list):
+            raise LabError("invalid_regex", f"regexes[{group_index}].entries must be an array")
+        entry_count += len(entries)
+        if entry_count > MAX_ENTRIES:
+            raise LabError("too_many_entries", f"combined regex entries exceed {MAX_ENTRIES}")
+        normalized_entries: list[dict[str, Any]] = []
+        for entry_index, raw in enumerate(entries):
+            label = f"regexes[{group_index}].entries[{entry_index}]"
+            if not isinstance(raw, dict):
+                raise LabError("invalid_regex", f"{label} must be an object")
+            identifier = raw.get("identifier")
+            entry_name = raw.get("name")
+            find_regex = raw.get("findRegex")
+            replace_string = raw.get("replaceString")
+            trim_strings = raw.get("trimStrings", [])
+            placements = raw.get("placements")
+            timing = raw.get("timing")
+            substitution = raw.get("substitution")
+            enabled = raw.get("enabled", True)
+            if not isinstance(identifier, str) or not identifier:
+                raise LabError("invalid_regex", f"{label}.identifier must be a non-empty string")
+            if not isinstance(entry_name, str):
+                raise LabError("invalid_regex", f"{label}.name must be a string")
+            if not isinstance(find_regex, str) or not find_regex:
+                raise LabError("invalid_regex", f"{label}.findRegex must be a non-empty string")
+            if not isinstance(replace_string, str):
+                raise LabError("invalid_regex", f"{label}.replaceString must be a string")
+            if not isinstance(trim_strings, list) or any(not isinstance(item, str) for item in trim_strings):
+                raise LabError("invalid_regex", f"{label}.trimStrings must be a string array")
+            if not isinstance(placements, list) or not placements or any(item not in REGEX_PLACEMENTS for item in placements):
+                raise LabError(
+                    "invalid_regex",
+                    f"{label}.placements must be a non-empty array of user/char/reasoning/lorebook",
+                )
+            if timing not in REGEX_TIMINGS:
+                raise LabError("invalid_regex", f"{label}.timing is unsupported")
+            if substitution not in REGEX_SUBSTITUTIONS:
+                raise LabError("invalid_regex", f"{label}.substitution is unsupported")
+            if not isinstance(enabled, bool):
+                raise LabError("invalid_regex", f"{label}.enabled must be a boolean")
+            minimum = raw.get("minDepth")
+            maximum = raw.get("maxDepth")
+            for depth_name, depth_value in (("minDepth", minimum), ("maxDepth", maximum)):
+                if depth_value is not None and (
+                    isinstance(depth_value, bool) or not isinstance(depth_value, int) or depth_value < 0
+                ):
+                    raise LabError("invalid_regex", f"{label}.{depth_name} must be null or an integer >= 0")
+            if minimum is not None and maximum is not None and minimum > maximum:
+                raise LabError("invalid_regex", f"{label}.minDepth cannot exceed maxDepth")
+            if trim_strings:
+                raise LabError(
+                    "unsupported_regex_trim_strings",
+                    f"{label}.trimStrings is non-empty; its byte-level Tavo ordering is not supported by Prompt Lab",
+                )
+            if substitution == "escaped":
+                raise LabError(
+                    "unsupported_regex_escaped_substitution",
+                    f"{label} uses escaped substitution, whose byte-level Tavo escaping is not supported by Prompt Lab",
+                )
+            if "reasoning" in placements:
+                raise LabError(
+                    "unsupported_regex_reasoning",
+                    f"{label} targets reasoning, which is outside the current Prompt Lab support boundary",
+                )
+            if "lorebook" in placements and (minimum is not None or maximum is not None):
+                raise LabError(
+                    "unsupported_regex_lorebook_depth",
+                    f"{label} combines lorebook placement with depth bounds, whose counting domain is not supported by Prompt Lab",
+                )
+            normalized_entries.append(
+                {
+                    "identifier": identifier,
+                    "name": entry_name,
+                    "findRegex": find_regex,
+                    "replaceString": replace_string,
+                    "trimStrings": list(trim_strings),
+                    "placements": list(placements),
+                    "timing": timing,
+                    "substitution": substitution,
+                    "minDepth": minimum,
+                    "maxDepth": maximum,
+                    "enabled": enabled,
+                }
+            )
+        groups.append({"name": name, "entries": normalized_entries})
+    return groups
+
+
+def render_regex_groups(
+    groups: list[dict[str, Any]],
+    context: dict[str, str],
+    renderer: EjsRenderer,
+    warnings: list[WarningItem],
+) -> list[dict[str, Any]]:
+    """Render regex fields as Tavo does: EJS first, then optional raw macros."""
+
+    rendered_groups: list[dict[str, Any]] = []
+    for group_index, group in enumerate(groups):
+        rendered_entries: list[dict[str, Any]] = []
+        for entry_index, entry in enumerate(group["entries"]):
+            rendered_entry = copy.deepcopy(entry)
+            substitution = entry["substitution"]
+            for field in ("findRegex", "replaceString"):
+                source = f"regex:{group_index}:{entry['identifier']}.{field}"
+                text = entry[field]
+                ensure_text_budget(text, source)
+                macro_allowed = True
+                if EJS_RE.search(text):
+                    text, macro_allowed = renderer.render_ejs(text, warnings, source)
+                if macro_allowed and substitution == "raw":
+                    text = render_macros(text, context, renderer, warnings, source)
+                ensure_text_budget(text, source)
+                rendered_entry[field] = text
+            rendered_entries.append(rendered_entry)
+        rendered_groups.append({"name": group["name"], "entries": rendered_entries})
+    return rendered_groups
+
+
+def parse_regex_pattern(value: str, source: str) -> tuple[re.Pattern[str], bool]:
+    pattern = value
+    flags_text = "g"
+    if value.startswith("/"):
+        closing = None
+        for index in range(len(value) - 1, 0, -1):
+            if value[index] != "/":
+                continue
+            backslashes = 0
+            cursor = index - 1
+            while cursor >= 0 and value[cursor] == "\\":
+                backslashes += 1
+                cursor -= 1
+            if backslashes % 2 == 0:
+                closing = index
+                break
+        if closing is None:
+            raise LabError("invalid_regex_pattern", f"{source} has no closing slash")
+        pattern = value[1:closing].replace(r"\/", "/")
+        flags_text = value[closing + 1 :]
+    unsupported = set(flags_text).difference("gimsu")
+    if unsupported:
+        raise LabError(
+            "unsupported_regex_flags",
+            f"{source} uses unsupported flags: {''.join(sorted(unsupported))}",
+        )
+    python_flags = 0
+    if "i" in flags_text:
+        python_flags |= re.IGNORECASE
+    if "m" in flags_text:
+        python_flags |= re.MULTILINE
+    if "s" in flags_text:
+        python_flags |= re.DOTALL
+    # JavaScript named captures use (?<name>...), while Python uses
+    # (?P<name>...). Translate only identifier-shaped captures; lookbehind
+    # prefixes (?<=...) and (?<!...) do not match this expression.
+    pattern = re.sub(
+        r"\(\?<([A-Za-z_][A-Za-z0-9_]*)>",
+        r"(?P<\1>",
+        pattern,
+    )
+    try:
+        return re.compile(pattern, python_flags), "g" in flags_text
+    except re.error as error:
+        raise LabError(
+            "unsupported_regex_pattern",
+            f"{source} cannot be represented by the bounded Python regex adapter: {error}",
+        ) from error
+
+
+def javascript_replacement(match: re.Match[str], replacement: str) -> str:
+    """Apply the JavaScript String.replace replacement-token subset exactly.
+
+    The supported surface covers every standard replacement token: ``$$``,
+    ``$&``, the prefix/suffix tokens, ``$1``..``$99``, and ``$<name>``.
+    A malformed or unknown named capture fails closed instead of silently
+    producing a Python-specific approximation.
+    """
+
+    replacement = replacement.replace("{{match}}", match.group(0))
+    result: list[str] = []
+    index = 0
+    while index < len(replacement):
+        if replacement[index] != "$" or index + 1 >= len(replacement):
+            result.append(replacement[index])
+            index += 1
+            continue
+        next_value = replacement[index + 1]
+        if next_value == "$":
+            result.append("$")
+            index += 2
+            continue
+        if next_value == "&":
+            result.append(match.group(0))
+            index += 2
+            continue
+        if next_value == "`":
+            result.append(match.string[: match.start()])
+            index += 2
+            continue
+        if next_value == "'":
+            result.append(match.string[match.end() :])
+            index += 2
+            continue
+        if next_value == "<":
+            closing = replacement.find(">", index + 2)
+            if closing < 0:
+                raise LabError(
+                    "unsupported_regex_replacement",
+                    "regex replacement contains an unterminated $<name> token",
+                )
+            name = replacement[index + 2 : closing]
+            if not name or name not in match.re.groupindex:
+                raise LabError(
+                    "unsupported_regex_replacement",
+                    f"regex replacement references unavailable named capture: {name or '<empty>'}",
+                )
+            result.append(match.groupdict().get(name) or "")
+            index = closing + 1
+            continue
+        if next_value.isdigit() and next_value != "0":
+            digits = next_value
+            if index + 2 < len(replacement) and replacement[index + 2].isdigit():
+                candidate = digits + replacement[index + 2]
+                if int(candidate) <= (match.re.groups or 0):
+                    digits = candidate
+            group_index = int(digits)
+            if group_index <= (match.re.groups or 0):
+                result.append(match.group(group_index) or "")
+                index += 1 + len(digits)
+                continue
+        result.append("$")
+        index += 1
+    return "".join(result)
+
+
+def regex_surface_timings(surface: str) -> frozenset[str]:
+    if surface == "send":
+        return frozenset({"send", "sendAndDisplay"})
+    if surface == "display":
+        return frozenset({"display", "sendAndDisplay"})
+    if surface == "receive":
+        return frozenset({"receive", "editAndReceive"})
+    raise LabError("invalid_regex_surface", f"unknown regex surface: {surface}")
+
+
+def regex_depth_applies(entry: dict[str, Any], depth: int) -> bool:
+    minimum = entry.get("minDepth")
+    maximum = entry.get("maxDepth")
+    return (minimum is None or depth >= minimum) and (maximum is None or depth <= maximum)
+
+
+def apply_regex_value(
+    value: str,
+    groups: list[dict[str, Any]],
+    *,
+    placement: str,
+    surface: str,
+    depth: int,
+    location: str,
+) -> tuple[str, list[dict[str, Any]]]:
+    result = value
+    trace: list[dict[str, Any]] = []
+    allowed_timings = regex_surface_timings(surface)
+    for group_index, group in enumerate(groups):
+        for entry_index, entry in enumerate(group["entries"]):
+            if (
+                not entry["enabled"]
+                or placement not in entry["placements"]
+                or entry["timing"] not in allowed_timings
+                or not regex_depth_applies(entry, depth)
+            ):
+                continue
+            source = f"regex:{group_index}:{entry['identifier']}"
+            pattern, global_replace = parse_regex_pattern(entry["findRegex"], source)
+            before = result
+            match_count = 0
+
+            def replace(match: re.Match[str]) -> str:
+                nonlocal match_count
+                match_count += 1
+                return javascript_replacement(match, entry["replaceString"])
+
+            result = pattern.sub(replace, result, count=0 if global_replace else 1)
+            ensure_text_budget(result, f"{source}:{surface}:{location}")
+            if match_count:
+                trace.append(
+                    {
+                        "groupIndex": group_index,
+                        "group": group["name"],
+                        "entryIndex": entry_index,
+                        "entry": entry["identifier"],
+                        "surface": surface,
+                        "placement": placement,
+                        "location": location,
+                        "depth": depth,
+                        "matchCount": match_count,
+                        "changed": result != before,
+                        "beforeSha256": hashlib.sha256(before.encode("utf-8")).hexdigest(),
+                        "afterSha256": hashlib.sha256(result.encode("utf-8")).hexdigest(),
+                    }
+                )
+    return result, trace
+
+
+def apply_regex_messages(
+    messages: list[dict[str, str]],
+    groups: list[dict[str, Any]],
+    *,
+    surface: str,
+) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+    result = copy.deepcopy(messages)
+    trace: list[dict[str, Any]] = []
+    total = len(result)
+    for index, item in enumerate(result):
+        placement = "user" if item["role"] == "user" else "char" if item["role"] == "assistant" else None
+        if placement is None:
+            continue
+        depth = total - 1 - index
+        item["content"], item_trace = apply_regex_value(
+            item["content"],
+            groups,
+            placement=placement,
+            surface=surface,
+            depth=depth,
+            location=f"message:{index}",
+        )
+        trace.extend(item_trace)
+    return result, trace
+
+
+def apply_regex_lorebook_buckets(
+    buckets: dict[str, list[str]], groups: list[dict[str, Any]]
+) -> tuple[dict[str, list[str]], list[dict[str, Any]]]:
+    result = copy.deepcopy(buckets)
+    trace: list[dict[str, Any]] = []
+    for bucket, values in result.items():
+        for index, value in enumerate(values):
+            values[index], item_trace = apply_regex_value(
+                value,
+                groups,
+                placement="lorebook",
+                surface="send",
+                depth=0,
+                location=f"lorebook:{bucket}:{index}",
+            )
+            trace.extend(item_trace)
+    return result, trace
+
+
+def regex_response_surfaces(
+    compiled: dict[str, Any], response: str
+) -> tuple[str, str, list[dict[str, Any]], list[dict[str, Any]]]:
+    groups = compiled.get("regex", {}).get("groups", [])
+    persistent, receive_trace = apply_regex_value(
+        response,
+        groups,
+        placement="char",
+        surface="receive",
+        depth=0,
+        location="assistantResponse",
+    )
+    visible, display_trace = apply_regex_value(
+        persistent,
+        groups,
+        placement="char",
+        surface="display",
+        depth=0,
+        location="assistantResponse",
+    )
+    return persistent, visible, receive_trace, display_trace
+
+
 def compile_case(case: dict[str, Any], base_dir: Path, *, model_override: str | None = None) -> dict[str, Any]:
-    warnings: list[WarningItem] = []
+    warnings: list[WarningItem] = case_schema_warnings(case)
     assembly_budget = AssemblyBudget()
     if "preset" not in case or "character" not in case:
         raise LabError("missing_asset", "case requires preset and character")
@@ -1780,7 +2286,7 @@ def compile_case(case: dict[str, Any], base_dir: Path, *, model_override: str | 
         warnings.append(
             WarningItem(
                 "tavo_exported_preset_normalized",
-                "A single-order Tavo-exported prompts + prompt_order preset was normalized with the retained 0.93 relative-role mapping; non-relative and ambiguous orders remain fail-closed.",
+                "A single-order Tavo-exported prompts + prompt_order preset was normalized with the Tavo 0.93 relative-role compatibility mapping; non-relative and ambiguous orders remain fail-closed.",
                 "preset",
             )
         )
@@ -1790,7 +2296,7 @@ def compile_case(case: dict[str, Any], base_dir: Path, *, model_override: str | 
         warnings.append(
             WarningItem(
                 "nickname_single_chat_not_applied",
-                "Current official surfaces conflict on nickname scope; Prompt Lab v2 is single-chat and preserves character.name for {{char}} until a retained single-chat wire capture resolves it.",
+                "Single-chat nickname scope is not established in this Prompt Lab version, so {{char}} uses character.name and a non-empty nickname produces this warning.",
                 "character.nickname",
             )
         )
@@ -1806,6 +2312,7 @@ def compile_case(case: dict[str, Any], base_dir: Path, *, model_override: str | 
     persona = normalize_persona(
         resolve_json(persona_value, base_dir, "persona") if persona_value is not None else None
     )
+    regex_groups = normalize_regex_groups(case.get("regexes"), base_dir)
     history = normalize_history(case.get("history"), warnings)
     history, selected_greeting = choose_greeting(character, history, case.get("greeting"))
     user_input = case.get("userInput", case.get("input"))
@@ -1838,6 +2345,11 @@ def compile_case(case: dict[str, Any], base_dir: Path, *, model_override: str | 
                 raise LabError(
                     "invalid_macro_values",
                     "macroValues keys must be strings and values must be scalar",
+                )
+            if isinstance(value, float) and not math.isfinite(value):
+                raise LabError(
+                    "invalid_macro_values",
+                    "macroValues numbers must be finite",
                 )
             target[key.lower()] = str(value)
 
@@ -1879,8 +2391,12 @@ def compile_case(case: dict[str, Any], base_dir: Path, *, model_override: str | 
         case.get("includeCharacterBook", True), "case.includeCharacterBook"
     )
     books: list[dict[str, Any]] = []
-    total_input_bytes = json_size(preset) + json_size(character) + json_size(persona)
-    total_entries = len(preset["entries"])
+    total_input_bytes = (
+        json_size(preset) + json_size(character) + json_size(persona) + json_size(regex_groups)
+    )
+    total_entries = len(preset["entries"]) + sum(
+        len(group["entries"]) for group in regex_groups
+    )
     if include_character_book and isinstance(character.get("character_book"), dict):
         character_book = character["character_book"]
         unused_character_book_fields = [
@@ -1935,6 +2451,18 @@ def compile_case(case: dict[str, Any], base_dir: Path, *, model_override: str | 
         renderer,
         warnings,
     )
+    rendered_regex_groups = render_regex_groups(regex_groups, context, renderer, warnings)
+    if len(rendered_regex_groups) > 1:
+        warnings.append(
+            WarningItem(
+                "regex_group_order_bound_to_case",
+                "Multiple regex groups execute in case.regexes order; entry order within a group is supported, while cross-group binding order is not established.",
+                "regexes",
+            )
+        )
+    buckets, regex_lorebook_trace = apply_regex_lorebook_buckets(
+        buckets, rendered_regex_groups
+    )
     basic = preset.get("basicPrompts", {})
     unused_single_chat_templates = [
         field
@@ -1963,12 +2491,22 @@ def compile_case(case: dict[str, Any], base_dir: Path, *, model_override: str | 
                 warnings,
                 f"basicPrompts.lorebook:{identifier}",
             )
-            return wrap_lorebook(
+            wrapped = wrap_lorebook(
                 "\n\n".join(buckets[bucket]),
                 wrapper,
                 warnings,
                 f"marker:{identifier}",
             )
+            # Tavo 1.0 native worldbook markers keep one trailing newline before
+            # normal adjacent-role merging. The exported 0.93 compatibility
+            # path remains unchanged.
+            if (
+                preset_input == "tavo-native-basicPrompts-entries"
+                and wrapped
+                and not wrapped.endswith("\n")
+            ):
+                wrapped += "\n"
+            return wrapped
         simple = {
             "personaDescription": ("persona", "{{persona}}"),
             "charDescription": ("description", "{{description}}"),
@@ -2060,7 +2598,7 @@ def compile_case(case: dict[str, Any], base_dir: Path, *, model_override: str | 
                 warnings.append(
                     WarningItem(
                         "preset_absolute_adapter_merge",
-                        "Retained 0.93 captures merge preset absolute text into the target history slot, whose provider role wins over the configured entry role.",
+                        "In the Tavo 0.93 compatibility mapping, preset absolute text merges into the target history slot and the target slot role wins over the configured entry role.",
                         source,
                     )
                 )
@@ -2096,6 +2634,7 @@ def compile_case(case: dict[str, Any], base_dir: Path, *, model_override: str | 
                         chat_start,
                         assembly_budget,
                         "basicPrompts.chatStart",
+                        merge=False,
                     )
                 inserted_history = True
                 target = post
@@ -2115,7 +2654,7 @@ def compile_case(case: dict[str, Any], base_dir: Path, *, model_override: str | 
             warnings.append(
                 WarningItem(
                     "card_prompt_override_approximation",
-                    "The card main-prompt override follows the preset identifier/forbidOverrides contract but lacks a retained 0.93 wire oracle.",
+                    "The card main-prompt override follows the preset identifier/forbidOverrides contract, but exact provider placement is not supported by this compatibility path.",
                     source,
                 )
             )
@@ -2126,7 +2665,7 @@ def compile_case(case: dict[str, Any], base_dir: Path, *, model_override: str | 
             warnings.append(
                 WarningItem(
                     "card_prompt_override_approximation",
-                    "The card post-history override follows the preset identifier/forbidOverrides contract but lacks a retained 0.93 wire oracle.",
+                    "The card post-history override follows the preset identifier/forbidOverrides contract, but exact provider placement is not supported by this compatibility path.",
                     source,
                 )
             )
@@ -2135,7 +2674,7 @@ def compile_case(case: dict[str, Any], base_dir: Path, *, model_override: str | 
         if not marker_rendered:
             content = render_text(content, context, renderer, warnings, source)
         if content:
-            add_chunk(target, role, content, assembly_budget, source)
+            add_chunk(target, role, content, assembly_budget, source, merge=False)
             trace.append(
                 {
                     "source": source,
@@ -2203,7 +2742,23 @@ def compile_case(case: dict[str, Any], base_dir: Path, *, model_override: str | 
         allow_ejs=False,
     )
     assembly_budget.add(rendered_input, "userInput")
-    conversation = [*rendered_history, {"role": "user", "content": rendered_input}]
+    persistent_conversation = [
+        *rendered_history,
+        {"role": "user", "content": rendered_input},
+    ]
+    visible_conversation, regex_display_trace = apply_regex_messages(
+        persistent_conversation,
+        rendered_regex_groups,
+        surface="display",
+    )
+    provider_conversation, regex_send_trace = apply_regex_messages(
+        persistent_conversation,
+        rendered_regex_groups,
+        surface="send",
+    )
+    visible_history = visible_conversation[:-1]
+    visible_input = visible_conversation[-1]["content"]
+    conversation = provider_conversation
     rendered_absolute: list[AbsoluteInjection] = []
     for item in absolute:
         content = item.content
@@ -2222,7 +2777,25 @@ def compile_case(case: dict[str, Any], base_dir: Path, *, model_override: str | 
     conversation, applied_absolute, omitted_absolute = apply_absolute(
         conversation, rendered_absolute, warnings
     )
-    messages = merge_adjacent([*pre, *conversation, *post])
+    logical_messages = [*pre, *conversation, *post]
+    if preset_input == "tavo-native-basicPrompts-entries":
+        messages, adapter_trace = apply_tavo_openai_role_adapter(logical_messages)
+        adapter_policy = (
+            "Tavo 1.0 OpenAI-compatible policy: keep the first leading system chunk, "
+            "coerce later system chunks to user, then merge adjacent equal roles with two newlines"
+        )
+    else:
+        messages = merge_adjacent(logical_messages)
+        adapter_trace = [
+            {
+                "logicalIndex": index,
+                "sourceRole": item["role"],
+                "adapterRole": item["role"],
+                "coerced": False,
+            }
+            for index, item in enumerate(logical_messages)
+        ]
+        adapter_policy = "Tavo 0.93 exported-preset compatibility role mapping, then adjacent-role merge"
 
     model_config = case.get("model", {})
     if isinstance(model_config, str):
@@ -2246,7 +2819,7 @@ def compile_case(case: dict[str, Any], base_dir: Path, *, model_override: str | 
             + ", ".join(sorted(sensitive_paths)),
         )
     request = {"model": model, "messages": messages, "stream": False, **parameters}
-    request_size = len(json.dumps(request, ensure_ascii=False).encode("utf-8"))
+    request_size = len(strict_json_dumps(request, ensure_ascii=False).encode("utf-8"))
     if request_size > MAX_REQUEST_BYTES:
         raise LabError("request_too_large", f"compiled request exceeds {MAX_REQUEST_BYTES} bytes")
 
@@ -2284,27 +2857,394 @@ def compile_case(case: dict[str, Any], base_dir: Path, *, model_override: str | 
         "format": FORMAT,
         "mode": "compile",
         "compatibility": {
-            "target": "evidence-bounded Tavo-shaped v2 simulation",
-            "evidence": "retained provider captures plus current skill references",
+            "target": "Tavo-shaped v2 text simulation",
             "ejs": "sandboxed prompt-only subset; EJS first, macros second",
-            "ejsFieldOrder": "persona and core card fields, selected greeting, worldbook scan/content, then active preset order",
+            "ejsFieldOrder": "persona and core card fields, selected greeting, worldbook scan/content, regex group/entry fields, then active preset order",
             "dynamicTimeMacros": "one local-process clock snapshot; macroValues may override formatting",
             "statefulWorldbookTiming": "current-trigger approximation",
-            "scanPolicy": "current input plus previous scanDepth visible messages",
+            "scanPolicy": "current input counts as one slot plus up to scanDepth-1 previous visible messages; depth 0 keeps the current-input approximation",
             "absoluteOverflow": "omit with warning",
             "absoluteTieBreak": "source order",
-            "adjacentRoleMessages": "merged with two newlines",
+            "adapterRolePolicy": adapter_policy,
+            "adjacentRoleMessages": "merged with two newlines after adapter role mapping",
+            "nativeLorebookMarkerTrailingNewline": (
+                "preserved before adjacent-role merging for Tavo 1.0 native presets"
+                if preset_input == "tavo-native-basicPrompts-entries"
+                else "not applied to the exported-preset compatibility mode"
+            ),
+            "multiTurn": "session mode carries persistent user/assistant history and chat/global EJS state between turns",
+            "regex": "Tavo 1.0 supported send/receive/display/lorebook/order/depth subset; persistent, visible, and provider surfaces remain separate",
+            "regexDepth": "inclusive; depth 0 is the latest outgoing user message and increments backward by persisted chat message",
+            "regexUnsupported": "reasoning placement, non-empty trimStrings, escaped substitution, and lorebook depth fail closed",
             "advancedFrontend": "out-of-scope",
             "presetInput": preset_input,
         },
+        "persistentHistory": rendered_history,
+        "visibleHistory": visible_history,
+        "renderedUserInput": rendered_input,
+        "persistentUserInput": rendered_input,
+        "visibleUserInput": visible_input,
         "selectedGreeting": selected_greeting,
         "triggeredWorldbooks": triggered,
         "worldbookDecisions": decisions,
         "assemblyTrace": trace,
+        "adapterTrace": adapter_trace,
         "ejs": ejs_report,
+        "regex": {
+            "enabled": bool(rendered_regex_groups),
+            "groupCount": len(rendered_regex_groups),
+            "entryCount": sum(len(group["entries"]) for group in rendered_regex_groups),
+            "depthPolicy": "inclusive newest-first message depth: latest outgoing user=0",
+            "groupOrder": "case.regexes order",
+            "groups": rendered_regex_groups,
+            "sendTrace": regex_send_trace,
+            "displayTrace": regex_display_trace,
+            "lorebookSendTrace": regex_lorebook_trace,
+            "receiveTrace": [],
+            "responseDisplayTrace": [],
+        },
         "request": request,
         "warnings": unique_warnings,
     }
+
+
+def normalize_turns(case: dict[str, Any]) -> list[dict[str, Any]] | None:
+    if "turns" not in case:
+        return None
+    if "userInput" in case or "input" in case:
+        raise LabError(
+            "conflicting_input_modes",
+            "case.turns cannot be combined with top-level userInput/input",
+        )
+    value = case["turns"]
+    if not isinstance(value, list) or not value:
+        raise LabError("invalid_turns", "case.turns must be a non-empty array")
+    if len(value) > MAX_SESSION_TURNS:
+        raise LabError(
+            "too_many_turns", f"case.turns exceeds {MAX_SESSION_TURNS} turns"
+        )
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise LabError("invalid_turn", f"case.turns[{index}] must be an object")
+        user_input = item.get("userInput", item.get("input"))
+        if not isinstance(user_input, str) or not user_input:
+            raise LabError(
+                "invalid_turn", f"case.turns[{index}].userInput must be a non-empty string"
+            )
+        label = item.get("label")
+        if label is not None and (not isinstance(label, str) or not label):
+            raise LabError(
+                "invalid_turn", f"case.turns[{index}].label must be a non-empty string"
+            )
+        assistant_response = item.get("assistantResponse", _MISSING)
+        if assistant_response is not _MISSING and not isinstance(assistant_response, str):
+            raise LabError(
+                "invalid_turn",
+                f"case.turns[{index}].assistantResponse must be a string when supplied",
+            )
+        normalized.append(
+            {
+                "label": label,
+                "userInput": user_input,
+                "assistantResponse": assistant_response,
+            }
+        )
+    return normalized
+
+
+def session_budget_limit(case: dict[str, Any]) -> int:
+    value = case.get("sessionBudgetBytes", MAX_SESSION_BUDGET_BYTES)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise LabError("invalid_session_budget", "case.sessionBudgetBytes must be an integer")
+    if value < 1024 or value > MAX_SESSION_BUDGET_BYTES:
+        raise LabError(
+            "invalid_session_budget",
+            f"case.sessionBudgetBytes must be from 1024 through {MAX_SESSION_BUDGET_BYTES}",
+        )
+    return value
+
+
+def ensure_session_budget(used: int, additional: int, limit: int, source: str) -> None:
+    if additional < 0 or used + additional > limit:
+        raise LabError(
+            "session_budget_exceeded",
+            f"session byte budget {limit} would be exceeded at {source}",
+        )
+
+
+def case_for_session_turn(
+    case: dict[str, Any],
+    turn: dict[str, Any],
+    *,
+    turn_index: int,
+    history: list[dict[str, str]],
+    ejs_state: dict[str, Any] | None,
+) -> dict[str, Any]:
+    turn_case = copy.deepcopy(case)
+    turn_case.pop("turns", None)
+    turn_case.pop("input", None)
+    turn_case["userInput"] = turn["userInput"]
+    turn_case["history"] = copy.deepcopy(history)
+    if turn_index > 1:
+        turn_case["greeting"] = False
+    if ejs_state is not None:
+        config = turn_case.get("ejs")
+        if config is None or config is True:
+            config = {}
+        elif config is False:
+            config = {"mode": "off"}
+        elif not isinstance(config, dict):
+            raise LabError("invalid_ejs_config", "case.ejs must be a boolean or object")
+        else:
+            config = copy.deepcopy(config)
+        config["variables"] = json_clone(ejs_state, "session EJS state")
+        turn_case["ejs"] = config
+    return turn_case
+
+
+def session_turn_record(
+    compiled: dict[str, Any],
+    turn: dict[str, Any],
+    *,
+    turn_index: int,
+    assistant_source: str,
+    assistant_response: str | None,
+) -> dict[str, Any]:
+    record = copy.deepcopy(compiled)
+    record["mode"] = "compile-turn"
+    return {
+        "turnIndex": turn_index,
+        "label": turn.get("label"),
+        "userInput": turn["userInput"],
+        "assistantSource": assistant_source,
+        "assistantResponse": assistant_response,
+        **record,
+    }
+
+
+def next_session_history(
+    compiled: dict[str, Any], assistant_response: str | None
+) -> list[dict[str, str]]:
+    history = [
+        *copy.deepcopy(compiled.get("persistentHistory", compiled["visibleHistory"])),
+        {
+            "role": "user",
+            "content": compiled.get("persistentUserInput", compiled["renderedUserInput"]),
+        },
+    ]
+    if assistant_response is not None:
+        history.append({"role": "assistant", "content": assistant_response})
+    if len(history) > MAX_HISTORY_MESSAGES:
+        raise LabError(
+            "too_many_history_messages",
+            f"session history exceeds {MAX_HISTORY_MESSAGES} messages",
+        )
+    return history
+
+
+def aggregate_session_warnings(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    warnings: list[dict[str, Any]] = []
+    for turn in turns:
+        for warning in turn.get("warnings", []):
+            warnings.append({"turnIndex": turn["turnIndex"], **warning})
+    return warnings
+
+
+def compile_session(
+    case: dict[str, Any], base_dir: Path, *, model_override: str | None = None
+) -> dict[str, Any]:
+    turns = normalize_turns(case)
+    if turns is None:
+        raise LabError("missing_turns", "multi-turn compile requires case.turns")
+    for index, turn in enumerate(turns[:-1]):
+        response = turn["assistantResponse"]
+        if response is _MISSING or not response:
+            raise LabError(
+                "missing_assistant_response",
+                f"compile needs case.turns[{index}].assistantResponse to build the next request",
+            )
+
+    history: list[dict[str, str]] = copy.deepcopy(case.get("history", []))
+    ejs_state: dict[str, Any] | None = None
+    records: list[dict[str, Any]] = []
+    budget_limit = session_budget_limit(case)
+    budget_used = 0
+    for turn_index, turn in enumerate(turns, start=1):
+        turn_case = case_for_session_turn(
+            case,
+            turn,
+            turn_index=turn_index,
+            history=history,
+            ejs_state=ejs_state,
+        )
+        compiled = compile_case(turn_case, base_dir, model_override=model_override)
+        request_bytes = json_size(compiled["request"])
+        ensure_session_budget(
+            budget_used, request_bytes, budget_limit, f"compile turn {turn_index} request"
+        )
+        budget_used += request_bytes
+        response_value = turn["assistantResponse"]
+        assistant_response = None if response_value is _MISSING else response_value
+        persistent_response = assistant_response
+        visible_response = assistant_response
+        if assistant_response is not None:
+            persistent_response, visible_response, receive_trace, response_display_trace = (
+                regex_response_surfaces(compiled, assistant_response)
+            )
+            compiled["regex"]["receiveTrace"] = receive_trace
+            compiled["regex"]["responseDisplayTrace"] = response_display_trace
+        record = session_turn_record(
+            compiled,
+            turn,
+            turn_index=turn_index,
+            assistant_source="provided" if assistant_response is not None else "not-provided",
+            assistant_response=assistant_response,
+        )
+        record["persistentAssistantResponse"] = persistent_response
+        record["visibleAssistantResponse"] = visible_response
+        records.append(record)
+        ejs_state = copy.deepcopy(compiled["ejs"]["variables"]["final"])
+        history = next_session_history(compiled, persistent_response)
+
+    return {
+        "format": FORMAT,
+        "mode": "compile-session",
+        "status": "compiled",
+        "session": {
+            "turnCount": len(records),
+            "assistantPolicy": "provided assistantResponse is carried into the next request; all non-final turns require it",
+            "historyPolicy": "persistent ordered history plus each persistent user message and receive-transformed supplied assistant response",
+            "statePolicy": "chat/global EJS variables are carried turn-to-turn in memory only",
+            "retryPolicy": "no automatic retries",
+            "budget": {
+                "limitBytes": budget_limit,
+                "usedBytes": budget_used,
+                "remainingBytes": budget_limit - budget_used,
+            },
+        },
+        "turns": records,
+        "finalHistory": history,
+        "finalEjsVariables": ejs_state,
+        "warnings": aggregate_session_warnings(records),
+    }
+
+
+def resolved_case_fingerprint(case: dict[str, Any], base_dir: Path) -> str:
+    """Hash stable assets/config while excluding per-turn history, input, and state."""
+
+    value = copy.deepcopy(case)
+    for key in ("userInput", "input", "turns", "history"):
+        value.pop(key, None)
+    ejs = value.get("ejs")
+    if isinstance(ejs, dict):
+        ejs.pop("variables", None)
+
+    def resolve_asset(source: Any) -> Any:
+        if not isinstance(source, str):
+            return source
+        path = Path(source).expanduser()
+        if not path.is_absolute():
+            path = base_dir / path
+        return bounded_json(path.absolute())
+
+    for key in ("preset", "character", "persona"):
+        if key in value:
+            value[key] = resolve_asset(value[key])
+    for key in ("worldbooks", "regexes"):
+        if isinstance(value.get(key), list):
+            value[key] = [resolve_asset(item) for item in value[key]]
+    encoded = strict_json_dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def validate_state_credentials(value: Any) -> None:
+    found = find_sensitive_parameter_paths(value, "state")
+    if found:
+        raise LabError(
+            "state_contains_sensitive_field",
+            "Prompt Lab state cannot contain credential-like fields: "
+            + ", ".join(sorted(found)),
+        )
+
+
+def load_turn_state(path: Path, case_fingerprint: str) -> dict[str, Any]:
+    state = require_dict(bounded_json(path, require_private=True), "state")
+    validate_state_credentials(state)
+    if state.get("format") != STATE_FORMAT or state.get("schemaVersion") != CASE_SCHEMA_VERSION:
+        raise LabError(
+            "invalid_state_schema",
+            f"state must use format {STATE_FORMAT} and schemaVersion {CASE_SCHEMA_VERSION}",
+        )
+    if state.get("caseFingerprint") != case_fingerprint:
+        raise LabError(
+            "state_case_mismatch",
+            "state was created for different Prompt Lab assets or stable configuration",
+        )
+    turn_index = state.get("turnIndex")
+    if isinstance(turn_index, bool) or not isinstance(turn_index, int) or turn_index < 0:
+        raise LabError("invalid_state", "state.turnIndex must be an integer >= 0")
+    history = normalize_history(state.get("history"))
+    variables = state.get("ejsVariables", {"chat": {}, "global": {}})
+    if (
+        not isinstance(variables, dict)
+        or not isinstance(variables.get("chat"), dict)
+        or not isinstance(variables.get("global"), dict)
+    ):
+        raise LabError("invalid_state", "state.ejsVariables must contain chat/global objects")
+    variables = json_clone(variables, "state.ejsVariables")
+    budget = state.get("budget")
+    if not isinstance(budget, dict):
+        raise LabError("invalid_state", "state.budget must be an object")
+    limit = budget.get("limitBytes")
+    used = budget.get("usedBytes")
+    if (
+        isinstance(limit, bool)
+        or not isinstance(limit, int)
+        or not 1024 <= limit <= MAX_SESSION_BUDGET_BYTES
+        or isinstance(used, bool)
+        or not isinstance(used, int)
+        or not 0 <= used <= limit
+    ):
+        raise LabError("invalid_state", "state budget values are invalid")
+    normalized = {
+        "format": STATE_FORMAT,
+        "schemaVersion": CASE_SCHEMA_VERSION,
+        "caseFingerprint": case_fingerprint,
+        "turnIndex": turn_index,
+        "history": history,
+        "ejsVariables": variables,
+        "budget": {"limitBytes": limit, "usedBytes": used},
+    }
+    return normalized
+
+
+def make_turn_state(
+    *,
+    case_fingerprint: str,
+    turn_index: int,
+    history: list[dict[str, str]],
+    ejs_variables: dict[str, Any],
+    budget_limit: int,
+    budget_used: int,
+) -> dict[str, Any]:
+    state = {
+        "format": STATE_FORMAT,
+        "schemaVersion": CASE_SCHEMA_VERSION,
+        "caseFingerprint": case_fingerprint,
+        "turnIndex": turn_index,
+        "history": copy.deepcopy(history),
+        "ejsVariables": json_clone(ejs_variables, "state EJS variables"),
+        "budget": {
+            "limitBytes": budget_limit,
+            "usedBytes": budget_used,
+            "remainingBytes": budget_limit - budget_used,
+        },
+    }
+    validate_state_credentials(state["ejsVariables"])
+    return state
 
 
 def endpoint_url(base_url: str, allow_insecure_http: bool) -> str:
@@ -2379,8 +3319,8 @@ def redact_provider_value(value: Any, api_key: str | None) -> Any:
             if api_key:
                 key_text = key_text.replace(api_key, "<redacted-key>")
             key_text = re.sub(r"(?i)bearer\s+\S+", "Bearer <redacted>", key_text)
-            normalized = re.sub(r"[^a-z0-9_]", "_", key_text.lower()).strip("_")
-            if normalized in SENSITIVE_PARAMETER_KEYS:
+            normalized = normalized_security_key(key_text)
+            if normalized in NORMALIZED_SENSITIVE_PARAMETER_KEYS:
                 result[key_text] = "<redacted>"
             else:
                 result[key_text] = redact_provider_value(item, api_key)
@@ -2393,6 +3333,289 @@ def redact_provider_value(value: Any, api_key: str | None) -> Any:
     return value
 
 
+def redact_provider_text(value: str, api_key: str | None) -> str:
+    redacted = value.replace(api_key, "<redacted>") if api_key else value
+    return re.sub(r"(?i)bearer\s+\S+", "Bearer <redacted>", redacted)
+
+
+def provider_preview(raw: bytes, api_key: str | None) -> str:
+    """Return a bounded structural preview without exposing arbitrary text."""
+
+    decoded = raw.decode("utf-8", errors="replace")
+    try:
+        parsed = strict_json_loads(decoded)
+    except (json.JSONDecodeError, ValueError):
+        return "<non-JSON response body omitted>"
+    if not isinstance(parsed, (dict, list)):
+        return "<JSON scalar response body omitted>"
+    redacted = redact_provider_value(parsed, api_key)
+    return strict_json_dumps(
+        redacted, ensure_ascii=False, separators=(",", ":")
+    )[:2048]
+
+
+def provider_diagnostic(
+    *, status: int, content_type: str, raw: bytes, api_key: str | None
+) -> dict[str, Any]:
+    return {
+        "httpStatus": status,
+        "contentType": content_type or "unknown",
+        "responseBytes": len(raw),
+        "responseSha256": hashlib.sha256(raw).hexdigest(),
+        "preview": provider_preview(raw, api_key),
+    }
+
+
+def looks_like_html(value: str, content_type: str) -> bool:
+    lowered_type = content_type.lower()
+    stripped = value.lstrip().lower()
+    return "text/html" in lowered_type or stripped.startswith(("<!doctype html", "<html", "<head", "<body"))
+
+
+def tool_call_present(body: dict[str, Any]) -> bool:
+    choices = body.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            message = choice.get("message")
+            if isinstance(message, dict) and (
+                isinstance(message.get("tool_calls"), list) and bool(message["tool_calls"])
+                or isinstance(message.get("function_call"), dict)
+            ):
+                return True
+            if choice.get("finish_reason") in {"tool_calls", "function_call"}:
+                return True
+    output = body.get("output")
+    if isinstance(output, list):
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") in {
+                "function_call",
+                "custom_tool_call",
+                "tool_call",
+                "mcp_call",
+                "computer_call",
+            }:
+                return True
+            content = item.get("content")
+            if isinstance(content, list) and any(
+                isinstance(block, dict)
+                and block.get("type") in {"tool_use", "server_tool_use", "tool_call"}
+                for block in content
+            ):
+                return True
+    content = body.get("content")
+    if isinstance(content, list) and any(
+        isinstance(block, dict)
+        and block.get("type") in {"tool_use", "server_tool_use", "tool_call"}
+        for block in content
+    ):
+        return True
+    return body.get("stop_reason") == "tool_use"
+
+
+def content_text(value: Any) -> tuple[str | None, bool]:
+    """Extract explicit text blocks and report whether a text field was seen."""
+
+    if isinstance(value, str):
+        return (value if value.strip() else None), True
+    if not isinstance(value, list):
+        return None, False
+    pieces: list[str] = []
+    seen = False
+    for block in value:
+        if isinstance(block, str):
+            seen = True
+            if block.strip():
+                pieces.append(block)
+            continue
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        for key in ("text", "output_text"):
+            candidate = block.get(key)
+            if isinstance(candidate, str):
+                seen = True
+                if candidate.strip():
+                    pieces.append(candidate)
+                break
+            if isinstance(candidate, dict) and isinstance(candidate.get("value"), str):
+                seen = True
+                if candidate["value"].strip():
+                    pieces.append(candidate["value"])
+                break
+        else:
+            if block_type in {"text", "output_text"} and "content" in block:
+                candidate = block.get("content")
+                if isinstance(candidate, str):
+                    seen = True
+                    if candidate.strip():
+                        pieces.append(candidate)
+    return ("".join(pieces) if pieces else None), seen
+
+
+def extract_json_response_text(body: dict[str, Any]) -> tuple[str | None, str | None, bool]:
+    """Return text, extraction source, and whether an explicit text field existed."""
+
+    seen = False
+    choices = body.get("choices")
+    if isinstance(choices, list) and choices:
+        choice = choices[0]
+        if isinstance(choice, dict):
+            message = choice.get("message")
+            if isinstance(message, dict) and "content" in message:
+                text, item_seen = content_text(message.get("content"))
+                seen = seen or item_seen
+                if text is not None:
+                    return text, "choices[0].message.content", True
+            if "text" in choice:
+                text, item_seen = content_text(choice.get("text"))
+                seen = seen or item_seen
+                if text is not None:
+                    return text, "choices[0].text", True
+
+    if "output_text" in body:
+        text, item_seen = content_text(body.get("output_text"))
+        seen = seen or item_seen
+        if text is not None:
+            return text, "output_text", True
+
+    output = body.get("output")
+    if isinstance(output, list):
+        pieces: list[str] = []
+        for index, item in enumerate(output):
+            if not isinstance(item, dict) or "content" not in item:
+                continue
+            text, item_seen = content_text(item.get("content"))
+            seen = seen or item_seen
+            if text is not None:
+                pieces.append(text)
+        if pieces:
+            return "".join(pieces), "output[].content", True
+
+    if "content" in body:
+        text, item_seen = content_text(body.get("content"))
+        seen = seen or item_seen
+        if text is not None:
+            return text, "content[]", True
+    return None, None, seen
+
+
+def extract_sse_response_text(raw_text: str) -> tuple[str | None, int, bool, bool]:
+    pieces: list[str] = []
+    event_count = 0
+    text_field_seen = False
+    error_event_seen = False
+    event_name = ""
+    for line in raw_text.splitlines():
+        if not line.strip():
+            event_name = ""
+            continue
+        if line.startswith("event:"):
+            event_name = line[6:].strip().lower()
+            continue
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].lstrip()
+        if not payload or payload == "[DONE]":
+            continue
+        event_count += 1
+        if event_name == "error":
+            error_event_seen = True
+            continue
+        try:
+            event = strict_json_loads(payload)
+        except (json.JSONDecodeError, ValueError):
+            stripped = payload.strip()
+            if (
+                stripped
+                and not stripped.startswith(("{", "["))
+                and not looks_like_html(stripped, "text/event-stream")
+            ):
+                pieces.append(payload)
+                text_field_seen = True
+            continue
+        if isinstance(event, str):
+            text_field_seen = True
+            if event.strip():
+                pieces.append(event)
+            continue
+        if not isinstance(event, dict):
+            continue
+        if (
+            event.get("error") not in (None, {}, [])
+            or event.get("type") in {"error", "response.error"}
+        ):
+            error_event_seen = True
+            continue
+        event_pieces: list[str] = []
+        choices = event.get("choices")
+        if isinstance(choices, list):
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    continue
+                delta = choice.get("delta")
+                if isinstance(delta, dict) and "content" in delta:
+                    text, seen = content_text(delta.get("content"))
+                    text_field_seen = text_field_seen or seen
+                    if text is not None:
+                        event_pieces.append(text)
+                if "text" in choice:
+                    text, seen = content_text(choice.get("text"))
+                    text_field_seen = text_field_seen or seen
+                    if text is not None:
+                        event_pieces.append(text)
+        if isinstance(event.get("delta"), str):
+            text_field_seen = True
+            if event["delta"].strip():
+                event_pieces.append(event["delta"])
+        elif isinstance(event.get("delta"), dict) and isinstance(event["delta"].get("text"), str):
+            text_field_seen = True
+            if event["delta"]["text"].strip():
+                event_pieces.append(event["delta"]["text"])
+        text, _source, seen = extract_json_response_text(event)
+        text_field_seen = text_field_seen or seen
+        if text is not None and not event_pieces:
+            event_pieces.append(text)
+        pieces.extend(event_pieces)
+    return (
+        "".join(pieces) if pieces else None,
+        event_count,
+        text_field_seen,
+        error_event_seen,
+    )
+
+
+JSON_STRING_SOURCE = r'("(?:\\.|[^"\\])*")'
+MALFORMED_CHAT_CONTENT_RE = re.compile(
+    r'^\s*\{\s*"choices"\s*:\s*\[\s*\{\s*"message"\s*:\s*\{\s*'
+    r'"content"\s*:\s*' + JSON_STRING_SOURCE
+)
+MALFORMED_TOP_LEVEL_OUTPUT_TEXT_RE = re.compile(
+    r'^\s*\{\s*"output_text"\s*:\s*' + JSON_STRING_SOURCE
+)
+
+
+def extract_malformed_json_text(raw_text: str) -> str | None:
+    """Recover only structurally anchored model-text fields from malformed JSON."""
+
+    if re.search(r'"error"\s*:', raw_text, re.IGNORECASE):
+        return None
+    for pattern in (MALFORMED_CHAT_CONTENT_RE, MALFORMED_TOP_LEVEL_OUTPUT_TEXT_RE):
+        match = pattern.search(raw_text)
+        if match is None:
+            continue
+        try:
+            candidate = strict_json_loads(match.group(1))
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+    return None
+
+
 def call_model(
     request_body: dict[str, Any],
     *,
@@ -2400,54 +3623,561 @@ def call_model(
     api_key: str | None,
     timeout: float,
     allow_insecure_http: bool,
-) -> tuple[dict[str, Any], str | None, str]:
+    response_byte_limit: int = MAX_RESPONSE_BYTES,
+) -> tuple[dict[str, Any], str, str, dict[str, Any]]:
     url = endpoint_url(base_url, allow_insecure_http)
-    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream, text/plain",
+    }
     if api_key:
         api_key = validate_api_key(api_key, "API key")
         headers["Authorization"] = f"Bearer {api_key}"
-    payload = json.dumps(request_body, ensure_ascii=False).encode("utf-8")
+    payload = strict_json_dumps(request_body, ensure_ascii=False).encode("utf-8")
+    if response_byte_limit <= 0:
+        raise LabError("session_budget_exceeded", "no session budget remains for a provider response")
+    response_byte_limit = min(response_byte_limit, MAX_RESPONSE_BYTES)
     try:
         opener = urllib.request.build_opener(NoRedirectHandler())
         with opener.open(
             urllib.request.Request(url, data=payload, headers=headers, method="POST"),
             timeout=timeout,
         ) as response:
-            raw = response.read(MAX_RESPONSE_BYTES + 1)
+            raw = response.read(response_byte_limit + 1)
             status = response.status
+            content_type = response.headers.get("Content-Type", "")
     except urllib.error.HTTPError as error:
+        status = error.code
+        content_type = error.headers.get("Content-Type", "") if error.headers else ""
         try:
             raw = error.read(8192)
         except OSError:
             raw = b""
-        message = raw.decode("utf-8", errors="replace")
-        if api_key:
-            message = message.replace(api_key, "<redacted>")
-        message = re.sub(r"(?i)bearer\s+\S+", "Bearer <redacted>", message)[:2048]
-        raise LabError("provider_http_error", f"provider returned HTTP {error.code}: {message}") from error
+        finally:
+            error.close()
+        raise ProviderResponseError(
+            "provider_http_error",
+            f"provider returned HTTP {status}",
+            provider_diagnostic(
+                status=status,
+                content_type=content_type,
+                raw=raw,
+                api_key=api_key,
+            ),
+        ) from error
     except urllib.error.URLError as error:
         raise LabError("provider_connection_error", f"provider request failed: {error.reason}") from error
     except ValueError as error:
         raise LabError("provider_request_error", "provider request could not be constructed") from error
-    if len(raw) > MAX_RESPONSE_BYTES:
-        raise LabError("provider_response_too_large", f"provider response exceeds {MAX_RESPONSE_BYTES} bytes")
+    if len(raw) > response_byte_limit:
+        code = (
+            "session_budget_exceeded"
+            if response_byte_limit < MAX_RESPONSE_BYTES
+            else "provider_response_too_large"
+        )
+        raise ProviderResponseError(
+            code,
+            f"provider response exceeds the remaining {response_byte_limit}-byte limit",
+            provider_diagnostic(
+                status=status,
+                content_type=content_type,
+                raw=raw[:response_byte_limit],
+                api_key=api_key,
+            ),
+        )
+    diagnostic = provider_diagnostic(
+        status=status, content_type=content_type, raw=raw, api_key=api_key
+    )
     try:
-        body = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise LabError("invalid_provider_response", "provider did not return valid JSON") from error
+        raw_text = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ProviderResponseError(
+            "invalid_provider_response",
+            "provider response is not valid UTF-8 text",
+            diagnostic,
+        ) from error
+    if not raw_text.strip():
+        raise ProviderResponseError(
+            "empty_provider_response",
+            "provider returned HTTP success with an empty response body",
+            diagnostic,
+        )
+    if looks_like_html(raw_text, content_type):
+        raise ProviderResponseError(
+            "provider_error_document",
+            "provider returned an HTML document instead of model output",
+            diagnostic,
+        )
+
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    if media_type == "text/event-stream" or raw_text.lstrip().startswith("data:"):
+        content, event_count, text_seen, error_event_seen = extract_sse_response_text(raw_text)
+        if error_event_seen:
+            raise ProviderResponseError(
+                "provider_error_body",
+                "provider SSE stream contained an error event",
+                {**diagnostic, "eventCount": event_count},
+            )
+        if content is None:
+            code = "empty_provider_response" if text_seen else "unsupported_provider_response_shape"
+            raise ProviderResponseError(
+                code,
+                "provider SSE response contained no non-empty model text",
+                {**diagnostic, "eventCount": event_count},
+            )
+        content = redact_provider_text(content, api_key)
+        return (
+            {
+                "nonstandardResponse": {
+                    "kind": "sse",
+                    "eventCount": event_count,
+                    "responseSha256": diagnostic["responseSha256"],
+                }
+            },
+            content,
+            f"HTTP {status}",
+            {
+                "source": "sse.data",
+                "contentType": media_type or "text/event-stream",
+                "responseBytes": len(raw),
+                "warnings": [],
+            },
+        )
+
+    try:
+        body = strict_json_loads(raw_text)
+    except (json.JSONDecodeError, ValueError):
+        if media_type == "text/plain":
+            content = raw_text.strip()
+            if not content:
+                raise ProviderResponseError(
+                    "empty_provider_response",
+                    "provider returned an empty text/plain response",
+                    diagnostic,
+                )
+            content = redact_provider_text(content, api_key)
+            return (
+                {"nonstandardResponse": {"kind": "text/plain"}},
+                content,
+                f"HTTP {status}",
+                {
+                    "source": "text/plain",
+                    "contentType": media_type,
+                    "responseBytes": len(raw),
+                    "warnings": [],
+                },
+            )
+        recovered = extract_malformed_json_text(raw_text)
+        if recovered is None:
+            raise ProviderResponseError(
+                "unsupported_provider_response_shape",
+                "provider returned malformed JSON without an unambiguous model-text field",
+                diagnostic,
+            )
+        recovered = redact_provider_text(recovered, api_key)
+        return (
+            {
+                "nonstandardResponse": {
+                    "kind": "malformed-json-recovery",
+                    "responseSha256": diagnostic["responseSha256"],
+                }
+            },
+            recovered,
+            f"HTTP {status}",
+            {
+                "source": "malformed-json-explicit-text-field",
+                "contentType": media_type or "unknown",
+                "responseBytes": len(raw),
+                "warnings": [
+                    {
+                        "code": "nonstandard_provider_response",
+                        "message": "Provider JSON was malformed; Prompt Lab recovered only complete, explicitly named model-text fields.",
+                        "source": "provider.response",
+                    }
+                ],
+            },
+        )
     if not isinstance(body, dict):
-        raise LabError("invalid_provider_response", "provider JSON response must be an object")
-    content: str | None = None
-    try:
-        candidate = body["choices"][0]["message"]["content"]
-        if isinstance(candidate, str):
-            content = candidate
-    except (KeyError, IndexError, TypeError):
-        pass
+        raise ProviderResponseError(
+            "unsupported_provider_response_shape",
+            "provider JSON response must be an object containing a supported model-text field",
+            diagnostic,
+        )
+    if body.get("error") not in (None, {}, []):
+        raise ProviderResponseError(
+            "provider_error_body",
+            "provider returned an error object with HTTP 200",
+            diagnostic,
+        )
+    content, source, text_seen = extract_json_response_text(body)
+    if content is None:
+        if tool_call_present(body):
+            code = "tool_call_only_response"
+            message = "provider returned tool calls but no assistant text"
+        elif text_seen:
+            code = "empty_provider_response"
+            message = "provider returned an explicit text field with no non-empty text"
+        else:
+            code = "unsupported_provider_response_shape"
+            message = "provider JSON has no supported model-text field"
+        raise ProviderResponseError(code, message, diagnostic)
     body = redact_provider_value(body, api_key)
-    if content is not None:
-        content = redact_provider_value(content, api_key)
-    return body, content, f"HTTP {status}"
+    content = redact_provider_text(content, api_key)
+    return (
+        body,
+        content,
+        f"HTTP {status}",
+        {
+            "source": source,
+            "contentType": media_type or "application/json",
+            "responseBytes": len(raw),
+            "warnings": [],
+        },
+    )
+
+
+def run_one_turn(
+    case: dict[str, Any],
+    base_dir: Path,
+    *,
+    model_override: str | None,
+    base_url: str,
+    api_key: str | None,
+    timeout: float,
+    allow_insecure_http: bool,
+    allow_unrendered_ejs: bool,
+    state: dict[str, Any] | None,
+    user_input_override: str | None,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    if normalize_turns(case) is not None:
+        raise LabError(
+            "turns_not_allowed",
+            "run-turn executes exactly one Agent-reviewed turn; remove case.turns",
+        )
+    fingerprint = resolved_case_fingerprint(case, base_dir)
+    if state is not None and user_input_override is None:
+        raise LabError(
+            "missing_turn_input",
+            "continued run-turn requires an explicit non-empty --user-input",
+        )
+    turn_index = 1 if state is None else state["turnIndex"] + 1
+    budget_limit = session_budget_limit(case) if state is None else state["budget"]["limitBytes"]
+    budget_used = 0 if state is None else state["budget"]["usedBytes"]
+    turn_case = copy.deepcopy(case)
+    if user_input_override is not None:
+        if not user_input_override:
+            raise LabError("invalid_input", "--user-input must be non-empty")
+        turn_case["userInput"] = user_input_override
+        turn_case.pop("input", None)
+    if state is not None:
+        turn_case["history"] = copy.deepcopy(state["history"])
+        turn_case["greeting"] = False
+        config = turn_case.get("ejs")
+        if config is None or config is True:
+            config = {}
+        elif config is False:
+            config = {"mode": "off"}
+        elif not isinstance(config, dict):
+            raise LabError("invalid_ejs_config", "case.ejs must be a boolean or object")
+        else:
+            config = copy.deepcopy(config)
+        config["variables"] = copy.deepcopy(state["ejsVariables"])
+        turn_case["ejs"] = config
+    compiled = compile_case(turn_case, base_dir, model_override=model_override)
+    compiled["mode"] = "run-turn"
+    compiled["turnIndex"] = turn_index
+    compiled["status"] = "prepared"
+    compiled["stateCommitted"] = False
+    provider_endpoint = endpoint_url(base_url, allow_insecure_http)
+    if not allow_unrendered_ejs and compiled["ejs"]["unresolvedSources"]:
+        error = LabError(
+            "unrendered_ejs",
+            "run-turn refuses unresolved EJS; inspect ejs.unresolvedSources or explicitly allow the deviation",
+        )
+        compiled["status"] = "blocked-before-provider"
+        compiled["error"] = error_payload(error)
+        return compiled, None
+    request_bytes = json_size(compiled["request"])
+    try:
+        ensure_session_budget(
+            budget_used, request_bytes + 1, budget_limit, f"turn {turn_index} request"
+        )
+        attempted_used = budget_used + request_bytes
+        response, response_text, status, extraction = call_model(
+            compiled["request"],
+            base_url=base_url,
+            api_key=api_key,
+            timeout=timeout,
+            allow_insecure_http=allow_insecure_http,
+            response_byte_limit=budget_limit - attempted_used,
+        )
+        attempted_used += extraction["responseBytes"]
+    except LabError as error:
+        attempted_used = budget_used + request_bytes
+        if isinstance(error, ProviderResponseError):
+            attempted_used = min(
+                budget_limit,
+                attempted_used + int(error.diagnostic.get("responseBytes", 0)),
+            )
+        compiled["status"] = "provider-failed"
+        compiled["provider"] = {"endpoint": provider_endpoint, "status": "failed"}
+        compiled["error"] = error_payload(error)
+        compiled["budget"] = {
+            "limitBytes": budget_limit,
+            "committedUsedBytes": budget_used,
+            "attemptedUsedBytes": attempted_used,
+            "remainingCommittedBytes": budget_limit - budget_used,
+        }
+        return compiled, None
+
+    compiled["status"] = "completed"
+    compiled["provider"] = {"endpoint": provider_endpoint, "status": status}
+    compiled["responseExtraction"] = extraction
+    compiled["warnings"].extend(extraction.get("warnings", []))
+    compiled["response"] = response
+    compiled["responseText"] = response_text
+    persistent, visible, receive_trace, display_trace = regex_response_surfaces(
+        compiled, response_text
+    )
+    compiled["regex"]["receiveTrace"] = receive_trace
+    compiled["regex"]["responseDisplayTrace"] = display_trace
+    compiled["persistentResponseText"] = persistent
+    compiled["visibleResponseText"] = visible
+    next_history = next_session_history(compiled, persistent)
+    next_state = make_turn_state(
+        case_fingerprint=fingerprint,
+        turn_index=turn_index,
+        history=next_history,
+        ejs_variables=compiled["ejs"]["variables"]["final"],
+        budget_limit=budget_limit,
+        budget_used=attempted_used,
+    )
+    compiled["stateCommitted"] = True
+    compiled["nextState"] = {
+        "format": STATE_FORMAT,
+        "turnIndex": turn_index,
+        "historyMessages": len(next_history),
+        "caseFingerprint": fingerprint,
+        "budget": copy.deepcopy(next_state["budget"]),
+    }
+    return compiled, next_state
+
+
+def failed_session_result(
+    records: list[dict[str, Any]],
+    *,
+    turn_count: int,
+    failed_turn: int,
+    history: list[dict[str, str]],
+    ejs_state: dict[str, Any] | None,
+    error: LabError,
+    budget_used: int = 0,
+    budget_limit: int = MAX_SESSION_BUDGET_BYTES,
+) -> dict[str, Any]:
+    return {
+        "format": FORMAT,
+        "mode": "run-session",
+        "status": "failed",
+        "session": {
+            "turnCount": turn_count,
+            "completedTurns": sum(1 for item in records if item.get("responseText") is not None),
+            "failedTurn": failed_turn,
+            "assistantPolicy": "each successful provider responseText is carried into the next request",
+            "historyPolicy": "persistent ordered history plus each persistent user message and receive-transformed real assistant response",
+            "statePolicy": "chat/global EJS variables are carried turn-to-turn in memory only",
+            "retryPolicy": "no automatic retries; inspect the failed turn before an explicit rerun",
+            "budget": {
+                "limitBytes": budget_limit,
+                "usedBytes": budget_used,
+                "remainingBytes": max(0, budget_limit - budget_used),
+            },
+        },
+        "turns": records,
+        "finalHistory": history,
+        "finalEjsVariables": ejs_state,
+        "warnings": aggregate_session_warnings(records),
+        "error": error_payload(error),
+    }
+
+
+def run_session(
+    case: dict[str, Any],
+    base_dir: Path,
+    *,
+    model_override: str | None,
+    base_url: str,
+    api_key: str | None,
+    timeout: float,
+    allow_insecure_http: bool,
+    allow_unrendered_ejs: bool,
+) -> dict[str, Any]:
+    turns = normalize_turns(case)
+    if turns is None:
+        raise LabError("missing_turns", "multi-turn run requires case.turns")
+    for index, turn in enumerate(turns):
+        if turn["assistantResponse"] is not _MISSING:
+            raise LabError(
+                "assistant_response_not_allowed_in_run",
+                f"run calls the real provider for every turn; remove case.turns[{index}].assistantResponse",
+            )
+
+    history: list[dict[str, str]] = copy.deepcopy(case.get("history", []))
+    ejs_state: dict[str, Any] | None = None
+    records: list[dict[str, Any]] = []
+    provider_endpoint = endpoint_url(base_url, allow_insecure_http)
+    budget_limit = session_budget_limit(case)
+    budget_used = 0
+    for turn_index, turn in enumerate(turns, start=1):
+        try:
+            turn_case = case_for_session_turn(
+                case,
+                turn,
+                turn_index=turn_index,
+                history=history,
+                ejs_state=ejs_state,
+            )
+            compiled = compile_case(turn_case, base_dir, model_override=model_override)
+        except LabError as error:
+            records.append(
+                {
+                    "turnIndex": turn_index,
+                    "label": turn.get("label"),
+                    "userInput": turn["userInput"],
+                    "mode": "run-turn",
+                    "status": "compile-failed",
+                    "error": {"code": error.code, "message": str(error)},
+                }
+            )
+            return failed_session_result(
+                records,
+                turn_count=len(turns),
+                failed_turn=turn_index,
+                history=history,
+                ejs_state=ejs_state,
+                error=error,
+                budget_used=budget_used,
+                budget_limit=budget_limit,
+            )
+
+        if not allow_unrendered_ejs and compiled["ejs"]["unresolvedSources"]:
+            error = LabError(
+                "unrendered_ejs",
+                "run refuses EJS fields that fell back or were disabled; inspect this turn's ejs.unresolvedSources or pass --allow-unrendered-ejs knowingly",
+            )
+            record = session_turn_record(
+                compiled,
+                turn,
+                turn_index=turn_index,
+                assistant_source="not-produced",
+                assistant_response=None,
+            )
+            record["mode"] = "run-turn"
+            record["status"] = "blocked-before-provider"
+            record["error"] = error_payload(error)
+            records.append(record)
+            return failed_session_result(
+                records,
+                turn_count=len(turns),
+                failed_turn=turn_index,
+                history=history,
+                ejs_state=ejs_state,
+                error=error,
+                budget_used=budget_used,
+                budget_limit=budget_limit,
+            )
+
+        try:
+            request_bytes = json_size(compiled["request"])
+            ensure_session_budget(
+                budget_used, request_bytes + 1, budget_limit, f"turn {turn_index} request"
+            )
+            budget_used += request_bytes
+            response, response_text, status, extraction = call_model(
+                compiled["request"],
+                base_url=base_url,
+                api_key=api_key,
+                timeout=timeout,
+                allow_insecure_http=allow_insecure_http,
+                response_byte_limit=budget_limit - budget_used,
+            )
+            budget_used += extraction["responseBytes"]
+        except LabError as error:
+            if isinstance(error, ProviderResponseError):
+                budget_used = min(
+                    budget_limit,
+                    budget_used + int(error.diagnostic.get("responseBytes", 0)),
+                )
+            record = session_turn_record(
+                compiled,
+                turn,
+                turn_index=turn_index,
+                assistant_source="not-produced",
+                assistant_response=None,
+            )
+            record["mode"] = "run-turn"
+            record["status"] = "provider-failed"
+            record["provider"] = {"endpoint": provider_endpoint, "status": "failed"}
+            record["error"] = error_payload(error)
+            records.append(record)
+            return failed_session_result(
+                records,
+                turn_count=len(turns),
+                failed_turn=turn_index,
+                history=history,
+                ejs_state=ejs_state,
+                error=error,
+                budget_used=budget_used,
+                budget_limit=budget_limit,
+            )
+
+        record = session_turn_record(
+            compiled,
+            turn,
+            turn_index=turn_index,
+            assistant_source="provider",
+            assistant_response=response_text,
+        )
+        record["mode"] = "run-turn"
+        record["status"] = "completed"
+        record["provider"] = {"endpoint": provider_endpoint, "status": status}
+        record["responseExtraction"] = extraction
+        record["warnings"].extend(extraction.get("warnings", []))
+        record["response"] = response
+        record["responseText"] = response_text
+        persistent_response, visible_response, receive_trace, response_display_trace = (
+            regex_response_surfaces(compiled, response_text)
+        )
+        compiled["regex"]["receiveTrace"] = receive_trace
+        compiled["regex"]["responseDisplayTrace"] = response_display_trace
+        record["regex"] = copy.deepcopy(compiled["regex"])
+        record["persistentResponseText"] = persistent_response
+        record["visibleResponseText"] = visible_response
+        records.append(record)
+        ejs_state = copy.deepcopy(compiled["ejs"]["variables"]["final"])
+        history = next_session_history(compiled, persistent_response)
+
+    return {
+        "format": FORMAT,
+        "mode": "run-session",
+        "status": "completed",
+        "session": {
+            "turnCount": len(records),
+            "completedTurns": len(records),
+            "assistantPolicy": "each real provider responseText is carried into the next request",
+            "historyPolicy": "persistent ordered history plus each persistent user message and receive-transformed real assistant response",
+            "statePolicy": "chat/global EJS variables are carried turn-to-turn in memory only",
+            "retryPolicy": "no automatic retries",
+            "budget": {
+                "limitBytes": budget_limit,
+                "usedBytes": budget_used,
+                "remainingBytes": budget_limit - budget_used,
+            },
+        },
+        "turns": records,
+        "finalHistory": history,
+        "finalEjsVariables": ejs_state,
+        "warnings": aggregate_session_warnings(records),
+    }
 
 
 def atomic_output(path: Path, value: Any) -> None:
@@ -2457,7 +4187,7 @@ def atomic_output(path: Path, value: Any) -> None:
     try:
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(value, handle, ensure_ascii=False, indent=2)
+            handle.write(strict_json_dumps(value, ensure_ascii=False, indent=2))
             handle.write("\n")
         os.replace(temporary, path)
     finally:
@@ -2475,6 +4205,14 @@ def case_input_paths(case: dict[str, Any], case_path: Path) -> list[Path]:
     worldbooks = case.get("worldbooks", [])
     if isinstance(worldbooks, list):
         for value in worldbooks:
+            if isinstance(value, str):
+                candidate = Path(value).expanduser()
+                paths.append(
+                    (case_path.parent / candidate if not candidate.is_absolute() else candidate).absolute()
+                )
+    regexes = case.get("regexes", [])
+    if isinstance(regexes, list):
+        for value in regexes:
             if isinstance(value, str):
                 candidate = Path(value).expanduser()
                 paths.append(
@@ -2501,18 +4239,18 @@ def emit(value: Any, output: str | None) -> None:
     if output:
         atomic_output(Path(output).expanduser().absolute(), value)
     else:
-        print(json.dumps(value, ensure_ascii=False, indent=2))
+        print(strict_json_dumps(value, ensure_ascii=False, indent=2))
 
 
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     subcommands = root.add_subparsers(dest="command", required=True)
-    for name in ("compile", "run"):
+    for name in ("compile", "run", "run-turn"):
         command = subcommands.add_parser(name)
         command.add_argument("--case", required=True, help="Prompt Lab case JSON")
         command.add_argument("--model", help="Override model id")
         command.add_argument("--output", help="Write private JSON output (mode 0600)")
-        if name == "run":
+        if name in {"run", "run-turn"}:
             command.add_argument("--base-url", help=f"Provider base URL (or ${DEFAULT_BASE_URL_ENV})")
             command.add_argument("--api-key-env", default=DEFAULT_KEY_ENV, help="Environment variable containing the API key")
             command.add_argument("--api-key-file", help="Mode-0600 file containing the API key")
@@ -2527,8 +4265,12 @@ def parser() -> argparse.ArgumentParser:
             command.add_argument(
                 "--allow-unrendered-ejs",
                 action="store_true",
-                help="Explicitly send retained EJS source instead of refusing run",
+                help="Explicitly send unrendered EJS source instead of refusing run",
             )
+        if name == "run-turn":
+            command.add_argument("--state-in", help="Prior Prompt Lab state JSON (mode 0600)")
+            command.add_argument("--state-out", required=True, help="New private state JSON (mode 0600)")
+            command.add_argument("--user-input", help="Override case.userInput for exactly this turn")
     return root
 
 
@@ -2538,27 +4280,37 @@ def main(argv: list[str] | None = None) -> int:
         case_path = Path(args.case).expanduser().absolute()
         case = require_dict(bounded_json(case_path), "case")
         protected_paths = case_input_paths(case, case_path)
-        if args.command == "run" and args.api_key_file:
+        if args.command in {"run", "run-turn"} and args.api_key_file:
             protected_paths.append(Path(args.api_key_file).expanduser().absolute())
+        if args.command == "run-turn" and args.state_in:
+            protected_paths.append(Path(args.state_in).expanduser().absolute())
         ensure_output_safe(args.output, protected_paths)
+        if args.command == "run-turn":
+            ensure_output_safe(args.state_out, protected_paths)
+            if args.output and Path(args.output).expanduser().absolute() == Path(args.state_out).expanduser().absolute():
+                raise LabError("output_overwrites_state", "--output and --state-out must be different files")
         model_config = case.get("model", {})
         if isinstance(model_config, str):
             model_config = {"id": model_config}
         if not isinstance(model_config, dict):
             raise LabError("invalid_model", "case.model must be a string or object")
         configured_model = args.model or model_config.get("id") or os.environ.get(DEFAULT_MODEL_ENV)
-        if args.command == "run" and not configured_model:
+        if args.command in {"run", "run-turn"} and not configured_model:
             raise LabError(
                 "missing_model",
                 f"run requires --model, case.model.id, or ${DEFAULT_MODEL_ENV}",
             )
-        result = compile_case(case, case_path.parent, model_override=args.model)
-        if args.command == "run":
-            if not args.allow_unrendered_ejs and result["ejs"]["unresolvedSources"]:
-                raise LabError(
-                    "unrendered_ejs",
-                    "run refuses EJS fields that fell back or were disabled; inspect ejs.unresolvedSources or pass --allow-unrendered-ejs knowingly",
-                )
+        session_turns = normalize_turns(case)
+        if args.command == "compile":
+            result = (
+                compile_session(case, case_path.parent, model_override=args.model)
+                if session_turns is not None
+                else compile_case(case, case_path.parent, model_override=args.model)
+            )
+            emit(result, args.output)
+            return 0
+
+        if args.command in {"run", "run-turn"}:
             case_base_url = model_config.get("baseUrl")
             if case_base_url is not None and not isinstance(case_base_url, str):
                 raise LabError("invalid_base_url", "case.model.baseUrl must be a string")
@@ -2590,22 +4342,96 @@ def main(argv: list[str] | None = None) -> int:
                 api_key = validate_api_key(api_key, f"environment variable {args.api_key_env}")
             if not math.isfinite(args.timeout) or args.timeout <= 0 or args.timeout > 600:
                 raise LabError("invalid_timeout", "timeout must be > 0 and <= 600 seconds")
-            response, response_text, status = call_model(
-                result["request"],
-                base_url=base_url,
-                api_key=api_key,
-                timeout=args.timeout,
-                allow_insecure_http=args.allow_insecure_http,
-            )
+
+            if args.command == "run-turn":
+                if Path(args.state_out).expanduser().absolute().exists():
+                    raise LabError(
+                        "state_output_exists",
+                        "--state-out must be a new path so a failed turn cannot leave a stale advanced state",
+                    )
+                fingerprint = resolved_case_fingerprint(case, case_path.parent)
+                state = (
+                    load_turn_state(Path(args.state_in).expanduser().absolute(), fingerprint)
+                    if args.state_in
+                    else None
+                )
+                result, next_state = run_one_turn(
+                    case,
+                    case_path.parent,
+                    model_override=args.model,
+                    base_url=base_url,
+                    api_key=api_key,
+                    timeout=args.timeout,
+                    allow_insecure_http=args.allow_insecure_http,
+                    allow_unrendered_ejs=args.allow_unrendered_ejs,
+                    state=state,
+                    user_input_override=args.user_input,
+                )
+                if next_state is not None:
+                    atomic_output(Path(args.state_out).expanduser().absolute(), next_state)
+                    result["nextState"]["written"] = True
+                emit(result, args.output)
+                return 0 if result["status"] == "completed" else 2
+
+            if session_turns is not None:
+                result = run_session(
+                    case,
+                    case_path.parent,
+                    model_override=args.model,
+                    base_url=base_url,
+                    api_key=api_key,
+                    timeout=args.timeout,
+                    allow_insecure_http=args.allow_insecure_http,
+                    allow_unrendered_ejs=args.allow_unrendered_ejs,
+                )
+                emit(result, args.output)
+                return 0 if result["status"] == "completed" else 2
+
+            result = compile_case(case, case_path.parent, model_override=args.model)
+            if not args.allow_unrendered_ejs and result["ejs"]["unresolvedSources"]:
+                raise LabError(
+                    "unrendered_ejs",
+                    "run refuses EJS fields that fell back or were disabled; inspect ejs.unresolvedSources or pass --allow-unrendered-ejs knowingly",
+                )
             result["mode"] = "run"
+            result["status"] = "prepared"
+            try:
+                response, response_text, status, extraction = call_model(
+                    result["request"],
+                    base_url=base_url,
+                    api_key=api_key,
+                    timeout=args.timeout,
+                    allow_insecure_http=args.allow_insecure_http,
+                )
+            except LabError as error:
+                result["status"] = "provider-failed"
+                result["provider"] = {
+                    "endpoint": endpoint_url(base_url, args.allow_insecure_http),
+                    "status": "failed",
+                }
+                result["error"] = error_payload(error)
+                emit(result, args.output)
+                return 2
+            result["status"] = "completed"
             result["provider"] = {"endpoint": endpoint_url(base_url, args.allow_insecure_http), "status": status}
+            result["responseExtraction"] = extraction
+            result["warnings"].extend(extraction.get("warnings", []))
             result["response"] = response
             result["responseText"] = response_text
-        emit(result, args.output)
-        return 0
+            persistent_response, visible_response, receive_trace, response_display_trace = (
+                regex_response_surfaces(result, response_text)
+            )
+            result["regex"]["receiveTrace"] = receive_trace
+            result["regex"]["responseDisplayTrace"] = response_display_trace
+            result["persistentResponseText"] = persistent_response
+            result["visibleResponseText"] = visible_response
+            emit(result, args.output)
+            return 0
+        raise LabError("invalid_command", f"unsupported command: {args.command}")
     except (LabError, OSError) as error:
         code = error.code if isinstance(error, LabError) else "io_error"
-        print(json.dumps({"format": FORMAT, "error": {"code": code, "message": str(error)}}, ensure_ascii=False), file=sys.stderr)
+        payload = error_payload(error) if isinstance(error, LabError) else {"code": code, "message": str(error)}
+        print(strict_json_dumps({"format": FORMAT, "error": payload}, ensure_ascii=False), file=sys.stderr)
         return 2
 
 

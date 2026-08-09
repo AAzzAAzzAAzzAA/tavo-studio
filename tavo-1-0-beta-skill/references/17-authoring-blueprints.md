@@ -4,15 +4,17 @@ This file turns Tavo creation work into repeatable production workflows. Use it 
 
 ## Universal Creation Loop
 
-1. Intake: identify target object, import path, runtime target, model, language, and validation depth.
+1. Intake: identify target object, import path, runtime target, model, language, and validation depth. If a vague, from-zero request still has unresolved choices that would materially change the artifact, use `references/29-creation-intake-interview.md`. If the user already supplied enough detail or explicitly delegates the choices, proceed with stated assumptions instead of forcing an interview.
 2. Select template from `assets/templates/`.
-3. Draft artifact with clear names using `Codex` only for test assets, not user deliverables.
+3. Draft artifact with clear names using `Community` only for test assets, not user deliverables.
 4. Run local validation.
 5. Run MCP dry-run when available.
 6. Run actual disposable import when the user wants proof or when the format is uncertain.
 7. Read back/export and compare.
 8. Capture screenshot only for visual behavior.
 9. Clean up disposable objects or register leftovers.
+
+For creative deliverables — character cards, world cards, worldbooks, openings, and dialogue examples — the drafting step runs the applicable craft pipeline in `references/13-creation-craft-workflows.md` before import verification: authoring gates, the matching expression ledger (Speech Pattern, Narrator Voice, Behavior, or none for rule-only text), detone cleaning with guarded writing for teacher fields, Prompt Lab checklist, text review, and the delivery report. The loop's import/validation steps run on the already-checked artifact.
 
 ## Choose The Smallest Correct Mechanism
 
@@ -38,10 +40,11 @@ For every generated object, return or retain:
 - a short field/dependency manifest;
 - local validation output;
 - exact import order when multiple objects are involved;
-- evidence label for each product claim;
+- version/scope label for each product claim;
 - runtime test steps and expected markers;
 - known unsupported or unverified edges;
-- readback/export diff when Tavo can normalize fields.
+- readback/export diff when Tavo can normalize fields;
+- the delivery report written to the workspace per the Delivery Report section in `references/13-creation-craft-workflows.md` for creative deliverables — retained by default, attached only when the user explicitly asks.
 
 Do not hide an unverified assumption inside an otherwise valid artifact. Put it in the manifest as a named validation case.
 
@@ -61,7 +64,7 @@ Avoid:
 
 - putting large world rules in a single description field;
 - treating old hard lints as product requirements;
-- claiming Tavo-native field preservation without import/readback evidence.
+- claiming Tavo-native field preservation without an import/readback result.
 
 Production sequence:
 
@@ -92,7 +95,7 @@ Author each entry as an independently useful prompt fragment:
 - use unique test markers that never appear in the user prompt or unrelated entries;
 - pair every positive with a non-trigger control when activation is the claim.
 
-Do not infer native semantics from SillyTavern field names alone. Use `references/21-worldbook-entry-semantics.md` for the native/compatibility mapping and current mixed keyword evidence.
+Do not infer native semantics from SillyTavern field names alone. Use `references/21-worldbook-entry-semantics.md` for the native/compatibility mapping and current keyword boundaries.
 
 ## Presets
 
@@ -108,7 +111,7 @@ Validation should check:
 
 Treat prompt items as an ordered program. For every item, document whether it is relative or absolute, its role, enabled state, order, depth, source field, and intended neighboring item. Test one isolated marker before stacking multiple entries. Marker visibility proves context presence; exact adjacency/role/order needs runtime prompt inspection or a capture gateway.
 
-Use `references/22-preset-prompt-injection.md` for the current native item model and evidence boundaries.
+Use `references/22-preset-prompt-injection.md` for the current native item model and behavior boundaries.
 
 ## Regex
 
@@ -180,7 +183,7 @@ Build order:
 6. Make the action produce two proofs: visible state plus app-state readback such as composer text, variable value, or stable message id.
 7. Capture screenshot and UI XML at the real Android viewport; add scroll, rerender, switch, or restart cases only if the feature promises them.
 
-The live baseline proves a responsive one-column mobile panel, delegated clicks, chat-scope `tavo.set/get`, and `tavo.input.set/append`. It does not prove `fixed`, `sticky`, cross-bubble overlays, iframe/sanitizer behavior, or native-app overlays. Read `references/07-rendering-tavojs.md`, `references/18-ar-tavojs-plugin-patterns.md`, and `references/25-ejs-tavojs-plugin-boundaries.md` before promising those edges.
+The Tavo 1.0 packaged baseline supports a responsive one-column mobile panel, delegated clicks, chat-scope `tavo.set/get`, and `tavo.input.set/append`. It does not establish `fixed`, `sticky`, cross-bubble overlays, iframe/sanitizer behavior, or native-app overlays. Read `references/07-rendering-tavojs.md`, `references/18-ar-tavojs-plugin-patterns.md`, and `references/25-ejs-tavojs-plugin-boundaries.md` before promising those edges.
 
 ## Plugins
 

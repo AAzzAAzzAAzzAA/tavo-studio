@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://codex.local/tavo/schemas/worldbook.schema.json",
+  "$id": "https://example.invalid/tavo-skill/schemas/worldbook.schema.json",
   "title": "Tavo Worldbook Candidate Fixture",
   "type": "object",
   "required": ["name", "entries"],
