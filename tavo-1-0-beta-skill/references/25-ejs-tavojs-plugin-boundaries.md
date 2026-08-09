@@ -1,294 +1,193 @@
-# EJS, TavoJS, Plugin, And MCP Boundaries
+# EJS、TavoJS、Plugin 与 MCP 的边界
 
-本页固定宏、EJS、TavoJS、TPG 插件、外部 MCP 和原生 Agent Loop 六条通道的能力边界。重点不是罗列“看起来能做什么”，而是区分：提示词渲染、WebView 运行、插件封装、外部 RPC、模型工具循环、持久数据写入和可视化证明分别由什么证据支持。
+本页用于区分六条容易混淆的通道：宏、EJS、TavoJS、TPG 插件、外部 MCP 和 Agent Loop。判断一个方案时，先确定代码或文本在哪个阶段运行，再判断它能访问什么对象、效果保存在哪里。
 
-## Snapshot And Verdict Contract
+## 适用版本
 
-当前声明面为 Tavo `1.0.0`。1.0 Agent Loop/MCP 增量摘要为 `assets/evidence/1.0.0/20260807-agent-loop-mcp-live-matrix.json`。0.93 的 216 项零真实模型矩阵仍是未重测广泛能力的 prior-version 基线；AR/EJS 等没有在 1.0 获得同类 visual/semantic effect 的结论，仍只能沿用明确标注版本的 0.91/0.92 保留基线。
+- Tavo `1.0.0`：适用于本页的 Agent Loop 与 MCP 能力边界。
+- Tavo `0.93.x`：适用于常规提示词组装、世界书、角色卡和预设文本测试。
+- Tavo `0.92.x`：适用于插件根入口、兼容入口、config、Hooks 与 TTS 的细节。
+- Tavo `0.91.x`：适用于高级渲染、TavoJS、世界书与消息交互的既有行为基线。
 
-- fresh 官方文档：2026-07-26 fail-closed 全量抓取完成，`83` 页、`0` 错误、`0` 未抓取、`0` 缺失文本；持久快照为 `assets/official-docs/text-20260726/` 与 `assets/official-docs/official_manifest-20260726.json`。
-- current MCP surface：Tavo `1.0.0`，协议 `2025-06-18`，`72` tools、`19` resources、`7` resource templates、`0` prompts，全部动态 docs/schema 读取成功；脱敏入口为 `assets/evidence/1.0.0/20260807-gate.json`。
-- current Agent Loop：动态模式首轮固定 search/ask/web 三工具；关闭动态加载时首轮为 58 个内置命名工具加 `web_fetch`，共 59 个；工具属于 Tavo 全局，不属于角色卡。
-- current live matrix：1.0 只提升已执行的 Agent Loop、memory append、message insert regression 与最小插件 action 轴；真实模型成功不能代证未执行的 app 能力。
-- current plugin delta：最小本地化 spec-2 插件已在 1.0 完成 validate/package/install/enable/action/disable；根 `entry.js`、旧 `scripts.actions` 兼容、Hooks/config/TTS 等详细行为仍需沿用逐版本证据。
-- prior-version live evidence：0.93 继续保留广泛零真实模型请求组装/UI/持久化/backup 结论；`assets/evidence/0.92.0/20260717-live-matrix.json` 保留详细 entry/config/input/generation/TTS 行为；0.91 保留 AR、TavoJS、世界书与消息 effect。它们都不能自动升级为 1.0 effect。
+旧版本结论不能自动当成新版本保证。若交付依赖具体 UI、持久化、Hook 时序或权限行为，应在目标版本做一次最小复核。
 
-本文只使用三个 verdict：
+## 六条通道总览
 
-- `verified`：精确到原子行为的结论已有对应版本的真机 effect/readback/UI artifact；必要时用 `verified (surface)` 与 `verified (effect)` 区分“入口存在”和“效果发生”。0.91 effect 不能省略版本标签。
-- `official-only`：fresh 官方文档描述了该行为，但当前证据没有执行并回读这一精确行为。
-- `runtime-only`：当前 MCP 文档、schema 或工具面声明了行为，但没有匹配的 Android effect。
-- `missing`：fresh 官方文档、current MCP 和对应版本真机证据都没有证明该精确行为；这表示“证据缺失”，不自动表示产品绝对不支持。
-
-任何 verdict 都只覆盖该格写明的原子行为。一个通道的成功不能自动提升另一个通道，同名 API 在不同宿主中的成功也不能互相代证。
-
-## Six Channels At A Glance
-
-| 通道 | 运行阶段与宿主 | 当前能力边界 | 不能据此声称 |
+| 通道 | 运行阶段与宿主 | 能做什么 | 不能据此声称 |
 | --- | --- | --- | --- |
-| 宏 `{{...}}` | 提示词式文本的宏展开；EJS 之后 | 注入角色、用户、场景、最近消息等上下文；操作 chat/global 变量宏 | 读取或修改世界书资产；控制真实输入框；消息 CRUD；执行 DOM/JS；证明 AR UI |
-| EJS `<% ... %>` | 提示词组装阶段；先于宏 | 条件、循环、字符串输出、chat/global 变量 helper；可在世界书内容和扫描关键词等提示词字段中运行 | 任意浏览器 JS；`tavo.*` API；世界书资产 CRUD；输入框控制；消息 CRUD；插件 contribution |
-| TavoJS `tavo.*` | 开启相应 WebView/JavaScript 运行条件后的脚本环境 | 官方公开变量、消息、聊天、世界书、输入框、文件、生成、图片与 TTS 等 API | 仅凭文档证明真机执行、声音、视觉布局、确认弹窗、字段保真或重启后持久化 |
-| TPG 插件 | 安装的 `.tpg` 包；spec 2 manifest、根 `entry.js`、native contribution 加 scoped TavoJS facade | SemVer/min-app、package i18n、actions/sidebar/fragments/settings；config/i18n 读取；chat/message、input、generation Hooks；TTS | 把 TPG 当成独立数据 API；把 `permissions` 当强制沙箱；把插件 contribution 当成模型工具注册 |
-| MCP | 外部 agent 通过 HTTP JSON-RPC `tools/call` 调用当前暴露工具 | 世界书、聊天、消息、输入框、插件和多类资产的明确工具/schema；读写安全字段 | 直接读写 Tavo 变量；执行气泡 TavoJS；证明 AR 布局、点击、遮挡、CSS 或 WebView 生命周期 |
-| Agent Loop | Tavo 把工具 schema 放入当前聊天的模型请求，并执行模型返回的 tool call | 动态 discovery、用户弹窗、网页获取、变量及多类 Tavo 对象操作；真实模型已完成多组隔离测试 | 当成角色卡自带工具；当成外部 MCP 的同一 surface；声称插件/角色卡已能注册模型工具 |
+| 宏 `{{...}}` | 提示词字段的宏展开；在 EJS 之后 | 注入角色、用户、场景、最近消息等上下文；读写 chat/global 变量宏 | 世界书资产 CRUD、真实输入框控制、消息 CRUD、DOM/JS、AR UI |
+| EJS `<% ... %>` | 提示词组装阶段；先于宏 | 条件、循环、字符串输出、chat/global 变量 helper；可用于世界书内容及扫描关键词等提示词字段 | 浏览器 JavaScript、`tavo.*`、世界书资产 CRUD、输入框控制、消息 CRUD、插件 contribution |
+| TavoJS `tavo.*` | 开启相应 WebView/JavaScript 条件后的脚本环境 | 变量、消息、聊天、世界书、输入框、文件、生成、图片与 TTS 等 API | 仅凭脚本声明保证视觉布局、确认弹窗、字段保真或重启后持久化 |
+| TPG 插件 | 安装的 `.tpg` 包；manifest、根 `entry.js`、native contribution 和 scoped TavoJS facade | actions、sidebar、fragments、settings、config/i18n、chat/message/input/generation Hooks、TTS | 独立数据 API、强制权限沙箱、模型工具注册 |
+| MCP | 外部 agent 通过 HTTP JSON-RPC 调用 Tavo 暴露的工具 | 世界书、聊天、消息、输入框、插件和多类资产的读写 | 直接运行气泡 TavoJS、读取 Tavo 变量、保证 AR 布局或 WebView 生命周期 |
+| Agent Loop | Tavo 把工具 schema 放进当前聊天的模型请求，并执行模型返回的 tool call | 工具发现、用户询问、网页获取、变量和多类 Tavo 对象操作 | 角色卡自带工具、外部 MCP 的同一入口、插件或角色卡注册任意模型工具 |
 
-## Worldbook Read And Mutation
+## 世界书读取与修改
 
-宏和 EJS “能写在世界书里”只表示世界书条目进入提示词组装时可以展开或执行模板。它们修改变量或输出文本时，没有读取世界书列表、取得世界书对象、保存条目或删除资产。
+宏或 EJS “写在世界书里”只表示：条目被拼进提示词时，其中的动态文本可以展开。它们不会因此获得世界书资产的读取、保存或删除能力。
 
-| 原子结论 | 宏 | EJS | TavoJS | TPG | MCP |
+| 原子能力 | 宏 | EJS | TavoJS | TPG | MCP |
 | --- | --- | --- | --- | --- | --- |
-| 在世界书提示词字段中做动态文本 | `official-only` | `official-only` | `missing` | `missing` | `missing` |
-| 读取世界书列表或对象 | `missing` | `missing` | `official-only` | `official-only`，经 scoped TavoJS | `verified (surface+read)` |
-| 暴露 create/import/update/delete 入口 | `missing` | `missing` | `official-only` | `official-only`，经 scoped TavoJS | `verified (surface)` |
-| 持久 import 后可再次读取 | `missing` | `missing` | `missing` | `missing` | `verified (effect)` |
-| create/read/update 经插件 TavoJS 完成并由 MCP 持久回读 | `missing` | `missing` | `verified (effect, plugin host)` | `verified (effect)` | `verified (readback)` |
-| actual delete 后 not-found | `missing` | `missing` | `official-only` | `official-only` | `missing`；本轮默认保留对象，仅做 tombstone update |
-| 导入字段原样保真 | `missing` | `missing` | `missing` | `missing` | `missing`；已有反例证明会规范化 |
+| 在世界书提示词字段中生成动态文本 | 支持 | 支持 | 不适用 | 不适用 | 不适用 |
+| 读取世界书列表或对象 | 不支持 | 不支持 | 支持 | 通过 scoped TavoJS 支持 | 支持 |
+| create/import/update/delete | 不支持 | 不支持 | 支持 | 通过 scoped TavoJS 支持 | 支持 |
+| 持久 import 后再次读取 | 不支持 | 不支持 | 需目标版本复核 | 需目标版本复核 | 支持 |
+| 导入对象逐字段原样保存 | 不保证 | 不保证 | 不保证 | 不保证 | 不保证；Tavo 可能规范化字段 |
 
 具体边界：
 
-- 宏：世界书内容中可用 `{{char}}`、`{{user}}`、`{{scenario}}`、最近消息和变量宏。`{{setvar::...}}` 改的是会话变量，不是世界书条目。
-- EJS：fresh docs 明确覆盖世界书“条目内容、扫描关键词”。`getvar/setvar/incvar/decvar/delvar` 改的是两层变量存储，不是世界书资产。
-- TavoJS：fresh docs 暴露 `tavo.lorebook.all/get/find/import/create/update/delete`。`import` 明确会先弹用户确认；当前官方页面没有同样明确承诺世界书 `create/update/delete` 都弹确认，因此不能类推。
-- TPG：current runtime docs 把 `tavo.lorebook.*` 放进 action/fragment 的 scoped facade。2026-07-11 case 34 已由 native plugin actions 依次执行 create/read/update 和保留式 tombstone update，宿主 action 返回对象 id `315`，MCP 按同一 id/marker readback，四步 direct runtime proof 通过。真实 delete 没有执行，不能把 tombstone 称为删除。
-- MCP：当前 tools 明确包含 `tavo_lorebook_search/get/create/update/import/delete`、`tavo_lorebook_entry_upsert/delete`。本轮只读重验通过 `search/get` 读回 retained 世界书 id `2`、revision `rev_c7df71df3f0b195b` 和 smoke marker；registry 记录其来源是实际 import。
-- 当前回读对象中的 entry identifier、默认策略和多项字段已被 Tavo 规范化。它证明“导入并持久存在”，同时反证“提交对象逐字段原样保存”。
-- case 34 的后续模型回复没有按测试格式返回预声明 marker，所以该 case 的 semantic 层失败；这不推翻已经按 id/readback 通过的 create/read/update/tombstone effect，也不能被写成“插件 CRUD 全部失败”。
+- 宏中的 `{{setvar::...}}` 修改会话变量，不是世界书条目。
+- EJS 的 `getvar/setvar/incvar/decvar/delvar` 修改变量存储，不是世界书资产。
+- TavoJS 提供 `tavo.lorebook.all/get/find/import/create/update/delete`。`import` 需要按产品交互处理用户确认；不要把某个动词的确认行为类推给所有动词。
+- TPG 的 action 或 fragment 通过 scoped TavoJS facade 使用世界书能力。
+- MCP 可通过世界书对象工具和 entry 工具读写；写入后应按稳定对象标识再次读取。
+- import/create 成功不代表提交对象的未知字段、默认值或 entry identifier 会逐字保留。
 
-## Variables And Scope
+## 变量与作用域
 
-变量名相同不代表作用域相同，也不代表五个通道共享同一个访问入口。
+同名变量不代表同一作用域，也不代表所有通道共享访问入口。
 
-| 通道 | 文档中的 scope | 当前结论 |
-| --- | --- | --- |
-| 宏 | chat：`setvar/addvar/incvar/decvar/getvar`；global：对应 `*globalvar` | `official-only`；没有当前宏渲染 artifact 证明持久效果 |
-| EJS | `chat` 默认、`global`；`local` 兼容 chat；`message`/`initial` 在 EJS helper 中也按 chat 处理 | chat `setvar/getvar/incvar` 与 TPG/TavoJS chat scope 互操作为 `verified`；global 为 `official-only`；EJS 的 `message` 名称不是 TavoJS 的真实 message scope |
-| TavoJS | `chat`、`global`、`message`，三者完全隔离 | chat `set/get` 为 `verified`；global/message 持久行为为 `official-only` |
-| TPG | action/fragment 共享 scoped `tavo.get/set/update/unset`；只有 `/messages` fragment 有当前消息上下文 | native input action 中 chat `set/get` 为 `verified`；其它 facade 方法与 global/message 持久性为 `official-only` |
-| MCP | current capabilities 把 variables 标为 `planned`，不是 available tool group | `missing`；当前没有 MCP 变量 get/set/unset 工具 |
-| Agent Loop | `chat`、`global`、`message` 内置变量工具，经模型 tool call 使用 | `verified (1.0 effect)` for isolated CRUD；不能反推外部 MCP variables 已上线 |
+| 通道 | 作用域与边界 |
+| --- | --- |
+| 宏 | chat：`setvar/addvar/incvar/decvar/getvar`；global：对应 `*globalvar` |
+| EJS | `chat` 为默认；支持 `global`；`local` 兼容 chat；helper 中的 `message`/`initial` 也按 chat 处理 |
+| TavoJS | `chat`、`global`、`message` 三个独立作用域 |
+| TPG | action/fragment 共用 scoped `tavo.get/set/update/unset`；只有 `/messages` fragment 有当前消息上下文 |
+| MCP | 当前没有变量 get/set/unset 工具；不能用 MCP 直接替代变量 API |
+| Agent Loop | 可通过模型工具调用操作 `chat`、`global`、`message` 变量；这不表示外部 MCP 也具备同一组工具 |
 
-现有真机 AR artifact 中，按钮代码先执行 `tavo.set(key, 'clicked', 'chat')`，再以 `tavo.get` 读取，随后把 `state=clicked` 写入可见状态和输入框。`after-click/screen.png` 与 `after-click/ui.xml` 同时出现该 marker，因此这只验证了当前 AR/TavoJS 宿主里的 chat scope set/get。它不验证：
+创作时要写清楚变量所有者和生命周期。例如“当前聊天的好感度”用 chat scope；“跨聊天的用户偏好”才考虑 global；绑定单条消息的状态使用 TavoJS message scope。EJS helper 中名为 `message` 的兼容 scope 不能当作 TavoJS 的真实 message scope。
 
-- global scope 跨聊天或重启持久化；
-- message scope 绑定、随消息删除或稳定 id roundtrip；
-- chat 变量随导出/导入保留；
-- 宏对同名变量的实际互操作；
-- MCP 直接读取变量。
+## 输入框：get、set、append、clear、send
 
-v23 为 EJS 与 TPG/TavoJS 的 chat scope 增加了双向 effect proof。每个 macro-ejs case 先由 native plugin action 用 `tavo.set` 写入一个运行时随机 token；角色 `description` 中的 EJS `getvar` 把该 token 放进真实模型上下文，同时 `incvar` 把 render counter 从 0 改为 1；随后另一个 plugin action 用 `tavo.get` 把同一 token 和 `after=1` 写回 composer。五个 token 均确认不在静态 sources、用户 prompt 或发送前消息中，五个 counter delta 均为 `+1`。这只验证 chat scope 和测试所用 helper，不证明 global、真实 TavoJS message scope 或宏变量互操作。
-
-2026-07-11 又通过短时请求捕捉网关补上 wire proof。Tavo 正常发送产生的最终 OpenAI-compatible body 为 `system -> user -> assistant -> user`；测试角色 `description` 中的 set/get/default、条件、循环、inc 和 EJS 输出宏都已在 `system` 文本中展开，原始 `<%`、`{{char}}`、`{{user}}` 为零残留，EJS 输出的角色/用户宏变成实际 character/persona 名称。对应模型流式完成并持久回复 `ACK`。原始证据在 `artifacts/tavo-validation/20260711-ejs-request-capture-v1/`，请求 id `2b937cc103c34a13`。这把“模型看见 marker”提升为该角色描述路径的真实 role/order/render 证据，但不代证其它字段的 wire 位置。
-
-2026-07-11 case 35 进一步在 chat A/B 中执行 `write A -> write B -> read B -> read A -> read B`，每次 plugin action 都读回各自 chat-scoped marker，证明测试路径中的 chat scope 随线程隔离。最后尝试切回 A 时，`tavo_current_chat_set` 返回 success/diff，但 immediate readback 与随后 9 次、约 5 秒轮询仍保持 B。这个结论分两层：chat-scope A/B direct runtime effect 通过；MCP current-chat switch 出现 success-without-effect regression。该 case 没有发送模型请求。
-
-## Input Box: Clear, Set, Append, Send
-
-宏中的 `{{input}}` 是生成上下文里的最近可见用户消息，不是当前 composer 文本。EJS 的 `lastUserMessage`/`lastCharMessage` 也是提示词上下文常量，不是输入框 API。
+宏中的 `{{input}}` 是生成上下文里的最近可见用户消息，不是当前输入框文本。EJS 的 `lastUserMessage`/`lastCharMessage` 也是提示词上下文值，不是输入框 API。
 
 | 通道 | get | set | append | clear | send |
 | --- | --- | --- | --- | --- | --- |
-| 宏 | `missing` | `missing` | `missing` | `missing` | `missing` |
-| EJS | `missing` | `missing` | `missing` | `missing` | `missing` |
-| TavoJS | `official-only` | `verified` | `verified` | `official-only` | `official-only` |
-| TPG | `official-only` | `verified`，native input actions | `verified`，native input actions | `official-only` | `official-only` |
-| MCP | `verified` | `verified` | `verified (effect)` | `verified (effect)` | `verified`，normal UI flow |
+| 宏 | 不支持 | 不支持 | 不支持 | 不支持 | 不支持 |
+| EJS | 不支持 | 不支持 | 不支持 | 不支持 | 不支持 |
+| TavoJS | 支持 | 支持 | 支持 | 支持 | 支持 |
+| TPG | 通过 scoped TavoJS 支持 | 支持 | 支持 | 支持 | 支持 |
+| MCP | 支持 | 支持 | 支持 | 支持 | 支持，走正常聊天发送流程 |
 
-当前 MCP surface 的五个工具是 `tavo_input_get/set/append/clear/send`，并明确：
+MCP 对应入口为 `tavo_input_get/set/append/clear/send`。它们绑定当前活动聊天页；没有活动聊天时失败，不应直接解释为权限失败。空白发送会被拒绝。
 
-- 绑定当前活动聊天页；没有活动聊天页时，失败不能直接解释为权限失败；
-- `send` 走正常 UI chat flow；空白发送会被拒绝；
-- 本轮只读 `tavo_input_get` 成功返回活动 chat id 与空文本，证明当前读取入口可用；
-- registry 的 `mcp-input-message-readback` 记录了 set/get/send 与消息 readback；v23 另以 `tavo_input_clear` 后立即 `input_get` 的空字符串 readback 证明 clear effect。2026-07-11 case 32 又执行 clear -> read empty -> set prefix -> append suffix -> exact full readback -> normal send，形成 append 的直接 effect proof 和完整持久 exchange。
+`input_append` 可能在现有文本与追加片段之间插入一个 ASCII 空格。需要精确字符串时，应在 append 后读取输入框并比较完整文本，不要假定它是无分隔符拼接。
 
-v23 的 AR/TavoJS message panels 分别执行三个 `tavo.input.set` 和两个 `tavo.input.append` action；native TPG inputActions 也执行三个 set 和两个 append。每次 action 后都由 MCP `input_get` 读回唯一 marker，再通过正常 input send 形成持久 user/assistant ID。这个证据不能反推 TavoJS/TPG 的 `clear` 或 `send`。
+输入框出现文本只表示 composer 已变化。只有发送并在聊天消息中出现，才表示文本进入聊天；这仍不等于模型生成成功。
 
-当前 MCP `input_append` 会在既有 composer 与追加片段之间插入一个 ASCII space。case 32 为得到精确目标文本，必须在原目标字符串已有的空格处分片，而不是把空格同时放进 suffix。作者脚本应在目标边界显式比较 `input_get`，不要假定 append 是无分隔符字符串拼接。
-
-输入框出现文本只证明 set/append 的 composer side effect。只有 send 后按稳定 message id 或当前聊天消息列表回读，才能证明消息已持久进入聊天；即使进入聊天，也不自动证明模型生成成功。
-
-## Message CRUD
+## 消息 CRUD
 
 | 通道 | Create | Read | Update | Delete |
 | --- | --- | --- | --- | --- |
-| 宏 | `missing` | 仅最近消息值为 `official-only`，不是对象读取 | `missing` | `missing` |
-| EJS | 仅输出模板文本，`missing` | 仅内置 last-message 常量为 `official-only` | `missing` | `missing` |
-| TavoJS | `tavo.message.append` 为 `official-only` | `find/get/current/count` 为 `official-only` | `update` 为 `official-only` | `delete` 为 `official-only` |
-| TPG | scoped facade 的 `append` 为 `official-only` | `find/get/current/count` 为 `official-only` | `update` 为 `official-only` | `delete` 为 `official-only` |
-| MCP | `append` 为 `verified (effect)`；中间 `insert` 当前 `missing` | `find/get/count` 为 `verified (surface+read)` | `update` 为 `verified (effect)` | `delete` 为 `dry-run-pass`、actual effect `missing` |
+| 宏 | 不支持 | 只能引用少量最近消息值，不是对象读取 | 不支持 | 不支持 |
+| EJS | 只能输出模板文本 | 只能使用内置最近消息常量 | 不支持 | 不支持 |
+| TavoJS | `tavo.message.append` | `find/get/current/count` | `update` | `delete` |
+| TPG | 通过 scoped facade 使用 `append` | `find/get/current/count` | `update` | `delete` |
+| MCP | `append`；当前没有中间 `insert` | `find/get/count` | `update` | `delete` |
 
 边界细节：
 
-- TavoJS 当前公开 API 没有文档化 `insert`；MCP 1.0 也已移除 `tavo_message_insert`。实测给 `tavo_message_append` 传中间 index 仍追加到末尾，不能把 append 当 insert，也不能把旧 MCP 能力反推给 TavoJS 或 TPG。
-- TavoJS `message.current()` 指执行脚本所在气泡。TPG 只有挂在 `/messages` 的 HTML fragment 才有 current message；`/chat` fragment、input action 和 sidebar action 中应为 `null`。
-- MCP message tools 显式接收 `chatId`。读取和目标操作优先用稳定 `id`；0-based `index` 会因插入/删除漂移。
-- 早期只读 `tavo_message_find` 与 registry 的 input send/readback 只证明读取和正常发送路径。v23 另在五个独立聊天中直接 `tavo_message_append` 一个 `MCP_ORIGINAL_*` assistant message，按 stable ID 读回，再用 `tavo_message_update` 改为 `MCP_UPDATED_*` 并再次读回；随后五个真实模型回复都包含 updated marker 且不含 original marker。因此 append/read/update 及其进入后续模型上下文为 `verified`，insert/delete effect 仍未验证。
-- 2026-07-11 case 33 再次 dry-run + actual append，按 stable id readback，再 dry-run + actual update 并读回；delete 只 dry-run，随后把同一消息更新为明确的 retained tombstone marker并读回。直接运行时步骤通过。后续真实模型看到了 retained marker，但可见回复首行没有遵守 nonce 格式，所以 semantic/format 层失败；不能把它改写成 MCP message CRUD 失败。
-- message append 成功不证明 UI 已正确渲染；UI 可见也不证明 reasoning、hidden、characterId 等字段逐项保真。
+- TavoJS 没有定义 `insert`；给 `append` 传中间 index 也不能把它当 insert。
+- `tavo.message.current()` 指执行脚本所在的消息气泡。TPG 只有挂在 `/messages` 的 fragment 才有 current message；`/chat` fragment、input action 和 sidebar action 中应按无当前消息处理。
+- MCP 消息工具显式接收 `chatId`。目标操作优先用稳定 `id`；0-based `index` 会因追加或删除漂移。
+- message append 成功不保证 UI 已正确渲染，也不保证 reasoning、hidden、characterId 等字段逐项保真。
 
-## TPG Actions, Sidebar, And HTML
+## TPG Actions、Sidebar 与 HTML
 
-TPG 不是第五套脚本语言。它把 manifest、native contribution、HTML 文件和 action registration script 打成 `.tpg`，实际行为通过安装后的 scoped TavoJS facade 执行。
+TPG 不是另一套脚本语言。它把 manifest、native contribution、HTML 文件和入口脚本打包为 `.tpg`，实际行为通过安装后的 scoped TavoJS facade 执行。
 
-| 原子结论 | Verdict | Evidence boundary |
+| 能力 | 结论 | 版本边界 |
 | --- | --- | --- |
-| `.tpg` package、manifest validation、install/readback | `verified (0.92 effect)` for root/wrapper/development zip | 0.92 positive import roundtrips；其它负例不能由正例代证 |
-| `inputActions` 注册到 runtime contributions | `verified (0.91 effect)`；0.92 package/runtime registration used by isolated fixtures | 0.92 matrix does not replace the older visual menu-click proof |
-| input action handler 真机点击并 set/append 输入框 | `verified (0.91 effect)` | 旧 registry artifact；v23 五个 native inputActions、composer readback 和模型调用 |
-| `sidebar` declaration 和 handler API | `official-only` | fresh docs 支持；本轮 current contributions 为 `sidebar: []`，无现有点击证据 |
-| `htmlFragments` 注册与 normalized mount | `verified (0.91 effect)` | 0.91 MCP 读到 `/chat/body/end` fragment |
-| HTML fragment 在真机可见 | `verified (0.91 effect)` | 0.91 screenshot/UI XML 可见 TPG/plugin panel markers |
-| HTML fragment 内按钮点击 | `missing` | 现有 after-click marker 属于 AR message panel，不是 TPG fragment panel |
-| 插件经 facade 完成世界书 create/read/update/tombstone | `verified (0.91 effect)` | case 34 action results + MCP stable-id/marker readback；actual delete 未执行 |
-| 根 `entry.js`、旧入口兼容与双入口优先级 | `verified (0.92 effect)` | F01-F03 真机矩阵 |
-| 无 UI contribution 的 entry 与 `plugin.config.get/all` | `verified (0.92 effect)` | F01/F04；通知别名可靠性另为 mixed |
-| input Hooks | `verified (0.92 effect)` within tested sources/faults | F06 三源、rewrite/cancel/fail-open/acceptance timing；attachment N/A |
-| generation Hooks | `mixed (0.92 effect)` | F07/F08 原子通过；F09 `othersContinuation` 回归且辅助排除 blocked |
-| plugin TTS | `mixed (0.92 integration)` | configured character/queue request pass；persona blocked；听感 manual |
+| `.tpg` package、manifest 校验、安装与读取 | 支持 | `0.92.x` 基线 |
+| `inputActions` 注册和处理输入框 | 支持 | `0.91.x` 起的既有行为 |
+| `sidebar` 声明和 handler | 支持；视觉位置与点击需在目标版本复核 | 当前版本不得仅凭声明推断 UI 效果 |
+| `htmlFragments` 注册和挂载 | 支持 | chat/message 插槽按 manifest 配置 |
+| fragment 内按钮交互 | 支持脚本实现；必须单独验证目标按钮 | native action 成功不能替代 fragment 按钮测试 |
+| 世界书 CRUD | 通过 scoped TavoJS 支持 | 每个写动词独立处理确认与回读 |
+| 根 `entry.js` 与旧入口兼容 | 支持；双入口时 `entry` 优先 | `0.92.x` 基线 |
+| `plugin.config.get/all` | 同步、只读，合并默认值与用户覆盖 | `all()` 返回浅拷贝，修改返回值不会保存 |
+| input Hooks | 支持 rewrite、cancel 和 fail-open | `0.92.x` 基线 |
+| generation Hooks | 支持 prepare/success/error/cancelled；来源覆盖并非全部等价 | `othersContinuation` 等路径要单独复核 |
+| plugin TTS | 支持 character/persona 选择与当前聊天队列控制 | 声音身份和听感需人工确认 |
 
-Manifest 和运行时边界：
+Manifest 和运行时规则：
 
-- 新插件的 `contributes.inputActions` 与 `contributes.sidebar` 必须配 `entry`，通常指向根 `entry.js`。旧 `scripts.actions` 仅为兼容别名；两者同时存在时 `entry` 优先。hook-only 插件可以只有 `entry` 而没有 UI contribution。
-- `contributes.htmlFragments` 是本地 UTF-8 HTML，挂载到 documented chat/message slots；它不是远程 URL，也不自动获得包内其它文件的 WebView 静态资源服务。
-- input/sidebar handler 与 fragments 在 Advanced Rendering WebView runtime 中运行。AR 关闭时，native action 可以仍然可见，但点击不会执行 handler，并会引导用户开启 AR。
-- fragment script 属于已安装 plugin runtime，不受“聊天内容 JavaScript 执行模式”控制；该模式只控制角色卡、模型输出和其它消息气泡脚本。
-- 插件入口/fragment 应使用未限定的词法 `tavo` 作为 scoped facade，不要把 `window.tavo` 或 `globalThis.tavo` 当作插件作用域契约。
-- MCP contribution readback 只能证明 manifest 被解析和 runtime entry 被注册，不能证明 native 菜单布局、点击、fragment 像素布局或遮挡。
+- `contributes.inputActions` 与 `contributes.sidebar` 应配置 `entry`，通常指根 `entry.js`。旧 `scripts.actions` 是兼容入口；两者同时存在时 `entry` 优先。
+- hook-only 插件可以只有 `entry`，不必声明 UI contribution。
+- `contributes.htmlFragments` 指向包内 UTF-8 HTML，挂载到 chat/message 插槽；它不是远程 URL，也不自动提供任意静态资源服务。
+- input/sidebar handler 与 fragment 依赖 Advanced Rendering WebView runtime。AR 关闭时，native action 可能仍可见，但脚本 handler 不能据此视为已运行。
+- fragment 脚本属于已安装插件 runtime，不受聊天内容 JavaScript 执行模式控制；后者只控制角色卡、模型输出等消息气泡脚本。
+- 插件入口和 fragment 使用词法 `tavo` 作为 scoped facade，不要把 `window.tavo` 或 `globalThis.tavo` 当作插件契约。
+- contribution 已注册只表示 manifest 和 runtime 入口被接受，不保证菜单布局、点击、像素位置或遮挡正确。
 
-0.92 新入口边界：
+### Hooks 与 TTS 的细节
 
-- `tavo.plugin.config.get/all` 同步、只读，合并 schema 默认值与用户覆盖；`all()` 返回浅拷贝，修改不会保存。
-- chat/message 通知只观察状态；message 具体事件先于 `message:changed`，流式中间状态不是 `message:added`。
-- `input:beforeSend/afterSend` 只在 entry 注册，覆盖 UI/TavoJS/MCP 三源；错误/超时/无效文本按 handler fail-open，显式 cancel 才停止后续 handler。
-- generation prepare/success/error/cancelled 只在 entry 注册，HTML fragment 不能注册。0.92 真机已逐项观察到 prepare/success 的改写与 fail-open、脱敏 error、cancel 的 `partial=true/false` 保存差异和单终态互斥；完整 source 白名单仍是 mixed，因为 `othersContinuation` 受控路径未触发 Hook，辅助生成排除项也未补证。
-- plugin `tavo.tts.play` 必须显式选择 character/persona；`stop` 控制共享 current-chat 队列。声音身份必须人工听感确认。
+- `input:beforeSend/afterSend` 只在 entry 注册，可覆盖 UI、TavoJS、MCP 等发送来源。错误、超时或无效返回按 fail-open；显式 cancel 才停止后续 handler。
+- generation 的 prepare/success/error/cancelled 只在 entry 注册，HTML fragment 不能注册。`prepare` 的改写进入当次 provider 请求，但不应默认改写已保存的用户消息；`success` 发生在助手消息保存前。
+- 流式中间状态不能当作多次持久 assistant add；具体消息事件与 `message:changed` 的顺序应按目标版本复核。
+- `tavo.input.send()` 返回的是接受阶段结果；没有观察到某个失败 reason，不代表该 reason 不存在。
+- `tavo.tts.play` 必须显式选择 character/persona；`stop` 控制共享的当前聊天队列。程序状态正常不代表声音角色或听感正确。
 
-0.92 真机补充边界：
+## 权限、确认与安全
 
-- `chat:opened` 字段、specific message event 在 `message:changed` 前、流式只产生一次持久 assistant add、handler 隔离均通过；`chat:changed` 兼容 handler 未收到受控 `chat:updated`，整组保持 mixed。
-- `generation:prepare` 的改写只进入瞬时 provider 请求，持久 user message 保持原文；`generation:success` 在保存前改写，空/异常/超时 fail-open。`reply`、`regeneration`、`continuation` 被观察到，但 `othersContinuation` 受控路径无 Hook/消息。
-- `tavo.input.send()` 的成功/失败对象与接受阶段返回通过；`busy` 未观察到，不能写成三种 reason 全覆盖。
-- Backup B 真机 roundtrip 恢复了插件 id/version/config/enabled/runtime contribution。它证明备份中的插件状态，不证明所有数据类型或降级恢复。
+### 宏与 EJS
 
-v23 的 plugin-action-panel family 仍不能替 HTML fragment 按钮补证。实际 marker 是 `TPG_<run>_*`，来自 `actions.js` 注册的 native `inputActions`；`ui/panel.html` 内按钮生成的是不同的 `TPG_PANEL_<run>_*`。五个前者通过不能改写成一个后者通过。
-
-## Permissions And Confirmation
-
-### Macro And EJS
-
-- fresh docs 没有为宏/EJS 变量写入描述逐次权限弹窗。它们在提示词渲染过程中执行，不能当作一次性用户点击事务。
-- EJS 默认开启，可在兼容性设置中关闭。错误标签会让整个字段回退到原始未渲染文本；“原文仍在”不是部分执行成功。
+- 宏/EJS 在提示词渲染阶段运行，不应设计成依赖逐次权限弹窗的事务。
+- EJS 可在兼容性设置中关闭。模板错误时，字段可能回退为未渲染文本；“原文仍在”不代表模板部分执行成功。
 - 宏/EJS 没有 TPG manifest permissions，也没有 MCP access scope。
 
 ### TavoJS
 
-- message content 中的 TavoJS 依赖相应 AR/JavaScript 设置。现有 registry 记录 JavaScript `自动` 模式出现风险提示并需明确确认。
-- fresh TavoJS docs 明确写到 `tavo.lorebook.import` 操作前弹用户确认。2026-07-11 case 34 在当前设备实际观察到 create 弹“是否允许创建世界书”，update 和 tombstone update 弹“是否允许修改世界书”；runner 只在动词与本次 runId 都匹配时确认。actual delete 没有运行，因此删除弹窗仍不能类推。
-- current runtime guide 的通用规则是破坏性、昂贵或外部动作可能受 Tavo confirmation settings 约束；每一个具体 API 是否弹窗仍以该 API 文档和真机为准。
+- 消息内容中的 TavoJS 依赖相应 AR/JavaScript 设置，并可能触发风险确认。
+- 世界书 import 和其它持久写操作应按产品交互处理确认。不要根据 create 的表现推断 update/delete 一定相同。
+- 破坏性、昂贵或外部动作可能受确认设置约束；每个 API 的行为单独判断。
 
 ### TPG
 
-- fresh docs 要求安装时阅读风险提示，只安装可信来源。插件可包含脚本和 UI fragment，启用/禁用不等于代码经过安全审计。
-- `manifest.permissions` 可声明 `input/message/generate/variable/file/network/tts` 等能力。0.92 MCP `tavo://docs/plugins` 明确说明它们是作者意图声明，尚不是运行时强制 permission gate。该结论为 `runtime-only` contract，不等于已经做过绕过测试。
-- 权限声明过少不保证调用会被拦截；声明完整也不代表用户已授权每一次持久写入。
+- 插件可包含脚本和 UI fragment，只安装可信包。启用成功不等于代码安全。
+- `manifest.permissions` 表达作者意图；在已知版本中不能把它当成完整的强制沙箱。
+- 权限声明少不保证调用会被阻止；声明完整也不表示用户已批准每次持久写入。
 
 ### MCP
 
-- MCP Server 默认关闭；用户选择 access scope 后启用，并以 bearer token 鉴权。当前官方 docs 明确 `403` 表示访问范围不允许连接或操作。
-- 拿到 endpoint 和 token 的客户端可调用已暴露工具。token 不能进入公开聊天、截图、reference、日志或 issue。
-- current write schemas 提供 `dryRun`、`expectedRevision`、`clientRequestId`。安全顺序是 read/search -> 最小 patch -> dry-run diff -> actual write -> stable-id readback。
-- current surface 没有证明每次 MCP write 都会出现手机端交互确认框。因此“已通过 bearer/access scope”不能当作用户对每次 destructive write 的确认。
-- 删除、覆盖、重置、卸载等 destructive operation 必须有明确操作意图；成功响应之后仍需 readback 证明最终状态。
+- MCP Server 默认关闭；启用时使用 access scope 和 bearer token。token 不得写入角色卡、世界书、聊天、截图、日志或公开 issue。
+- 写操作可使用 `dryRun`、`expectedRevision`、`clientRequestId`。推荐顺序是读取目标、构造最小 patch、预览差异、执行写入、按稳定标识回读。
+- access scope 允许连接不等于用户批准每次破坏性写操作。删除、覆盖、重置、卸载等操作必须有明确委托。
 
-## What The AR Screenshot Proves
+## 高级渲染结论边界
 
-当前工作树内最强的直接 AR 证据可用 v23 的首个 TavoJS panel case 复核：
+视觉验证只能说明当时屏幕中的 WebView、面板、按钮、状态文本和输入框效果。它不能自动说明：
 
-- `artifacts/tavo-validation/20260710-203300-semantic-model-kpi-v23/model-calls/tavojs-variable/01-attempt-1/ui-after-action/screen.png`
-- `artifacts/tavo-validation/20260710-203300-semantic-model-kpi-v23/model-calls/tavojs-variable/01-attempt-1/ui-after-action/ui.xml`
-- `artifacts/tavo-validation/20260710-203300-semantic-model-kpi-v23/model-calls/tavojs-variable/01-attempt-1/ui-after-action/package.txt`
-- `artifacts/tavo-validation/20260710-203300-semantic-model-kpi-v23/model-calls/tavojs-variable/01-attempt-1/ui-action/ui-action-marker-result.json`
-- `artifacts/tavo-validation/20260710-203300-semantic-model-kpi-v23/model-calls/tavojs-variable/01-attempt-1/ui-action/input-readback-action-1-poll-1.json`
-- 对应冻结源：`artifacts/tavo-validation/20260710-203300-semantic-model-kpi-v23/semantic-sources/advanced-rendering-js01a1.html`
-
-这些文件共同证明：
-
-- `package.txt` 为 Tavo `0.91.0`；
-- UI tree 中出现 `android.webkit.WebView`、`AR_PANEL_SV20260710203242JS01A1` 和五个 AR 按钮；
-- screenshot 中 panel、按钮、`state=clicked` 状态和 composer 文本同时真实可见；
-- 点击“AR 观察场景”后，状态变为 `AR_SV20260710203242JS01A1_OBSERVE state=clicked`；
-- MCP `input_get` 同时读回对应长文本；冻结源把该行为绑定到 chat-scope `tavo.set/get` 与 `tavo.input.set`；
-- 对应 `result.json` 还记录后续正常发送产生唯一 user/assistant message ID 和通过的真实模型回复。
-
-这些文件不证明：
-
-- TPG fragment 内按钮被点击；
-- native plugin input action、HTML fragment button 或 sidebar action 的点击效果；
-- 这个单一 observe case 中的 TavoJS `input.clear/append/send`；
-- message append/update/delete；
-- 世界书 create/update/delete；
+- TPG fragment 内另一颗按钮也可点击；
+- TavoJS 的所有 input/message/worldbook 方法都成功；
 - global/message 变量跨重启持久；
-- 导出/导入 roundtrip；
-- AR 在不同屏幕尺寸、滚动位置或聊天切换后仍无重叠。
+- 导入导出逐字段保真；
+- 不同屏幕尺寸、滚动位置和聊天切换后都没有遮挡；
+- fixed、sticky、z-index、overflow 等 CSS 组合在所有设备一致。
 
-因此，AR/CSS/HTML/JS 的视觉结论必须有 screenshot；MCP 或 UIAutomator 只能补结构和状态。反过来，screenshot 也不能替代 persistent readback。
+反过来，对象读取、API 返回或 DOM 结构也不能替代视觉检查。涉及布局、点击目标、遮挡和滚动时，必须检查实际渲染结果。
 
-v23 另外保留了十个计数内 AR/TavoJS panel case 的 before/after screenshot、UI XML、clicked status 和 composer readback，位于 `model-calls/tavojs-variable/` 与 `model-calls/advanced-rendering/`。它们证明当前 1200x2670 真机 viewport 中测试 panel 可见、按钮可点击、chat `set/get` 返回 `clicked`，且 input set/append side effect 可读。它们没有做 app restart、导出/导入、sanitization matrix、不同屏幕尺寸或 fixed/sticky/z-index/overflow A/B，不能升级这些边界。
+## 不可替代规则
 
-## Non-Substitution Rules For Persistent CRUD
+1. API 或工具入口存在，不代表调用权限、确认流程、参数、最终效果和持久化都正确。
+2. schema、manifest 校验、打包成功或 `dryRun` 只表示形状或预览可接受，不代表真实写入。
+3. 写调用返回 success 后，仍要按稳定 id 或 revision 检查最终对象。
+4. 对象状态正确不代表 AR 视觉、native 菜单、点击目标或 CSS 布局正确。
+5. 输入框 set/append 不代表 send；send 不代表直接消息 CRUD；消息保存不代表模型生成成功。
+6. 世界书 import 不代表 update/delete，也不保证 entry 逐字段保真或关键词触发语义。
+7. plugin contribution 注册不代表 handler 完成、fragment 可见或 sidebar 可用。
+8. chat 变量可用不代表 global/message scope 可用；EJS 的兼容 scope 也不能替代 TavoJS scope。
+9. MCP 工具成功不能替代同名 TavoJS API 测试；TPG handler 成功不能替代角色卡气泡中的 TavoJS 生命周期测试。
+10. Create、Read、Update、Delete 四个动词分别验证，不能互相代替。
 
-以下证明链不能互相替代：
+## 社区版创作与验证方法
 
-1. 官方文档或 runtime docs 只证明 contract 被声明，不证明当前设备执行成功。
-2. tool/API surface 只证明入口存在，不证明权限、确认、payload、effect 或持久性。
-3. local schema、manifest validation、package 成功或 `dryRun` 只证明形状/预览可接受，不证明真实写入。
-4. actual call 返回 success 只证明调用被接受；必须按 stable id/revision readback。
-5. readback 证明当前存储状态，不证明 AR 视觉、native 菜单、点击目标或 CSS 布局。
-6. screenshot 证明当时像素与可见 side effect，不证明数据库对象、未知字段、重启持久或导出保真。
-7. input set/append 证明 composer 变化，不证明 send；send 证明消息路径，不证明直接 message CRUD；消息落库不证明模型生成。
-8. worldbook import 证明对象创建，不证明 update/delete，不证明 entry 逐字段保真，也不证明关键词触发语义。
-9. plugin contribution readback 证明注册，不证明 handler 启动、异步完成、fragment 可见或 sidebar 可用。
-10. chat variable set/get 不证明 global/message scope；EJS 的 `message` 兼容名也不能替 TavoJS message scope。
-11. MCP 工具成功不能证明同名 TavoJS API；TPG handler 成功不能证明角色卡气泡中的 TavoJS 生命周期。
-12. 每个 C/R/U/D 动词分别取证。Create 不能代 Update，Read 不能代 Delete，Delete 的成功响应不能代删除后的 not-found/readback。
+1. 先写明目标效果属于提示词文本、输入框、持久对象、插件 runtime、模型工具调用还是可视 UI。
+2. 选择唯一正确通道；不要用 EJS 模拟 TavoJS，也不要把 MCP 当成 AR 浏览器。
+3. 每次只测一个原子行为，并使用唯一、无歧义的临时 marker。
+4. 在效果真正落点检查结果：提示词看模型输入，输入框看 composer，对象写入按稳定标识读取，视觉效果看实际渲染。
+5. 多轮测试由主 Agent 一轮一轮观察后再决定下一条消息，避免批量发送掩盖首轮偏差。
+6. 明确记录适用版本和未覆盖边界；测试通过不得扩大成整个通道或其它版本都通过。
 
-## Evidence Ledger
-
-### Fresh Official Docs
-
-- [宏（Macros）](https://docs.tavoai.dev/cn/guides/supported-macros/)
-- [EJS 模板](https://docs.tavoai.dev/cn/guides/ejs-template/)
-- [TavoJS API](https://docs.tavoai.dev/cn/guides/javascript-api/)
-- [高级前端渲染](https://docs.tavoai.dev/cn/guides/advanced-rendering/)
-- [世界书](https://docs.tavoai.dev/cn/guides/lore-book/)
-- [插件使用](https://docs.tavoai.dev/cn/guides/plugins/)
-- [插件开发](https://docs.tavoai.dev/cn/guides/plugin-development/)
-- [MCP Server](https://docs.tavoai.dev/cn/guides/mcp-server/)
-
-Durable current snapshot: `assets/official-docs/text-20260726/` and `assets/official-docs/official_manifest-20260726.json`. The 20260716 and 20260710 snapshots remain prior-version comparisons.
-
-### Current MCP And Agent Loop Surface
-
-- current redacted 1.0 gate: `assets/evidence/1.0.0/20260807-gate.json`
-- current Agent Loop/MCP matrix: `assets/evidence/1.0.0/20260807-agent-loop-mcp-live-matrix.json`
-- prior broad 0.93 zero-real matrix: `assets/evidence/0.93.0/20260726-zero-real-matrix.json`
-- prior complete 0.93 case map: `assets/evidence/0.93.0/20260726-case-outcomes.json`
-- prior full redacted 0.92 surface: `assets/schemas/mcp-surface-0.92.0-20260716.json`
-- current runtime resources used here: `tavo://capabilities`, `tavo://docs/macros`, `tavo://docs/tavojs`, `tavo://docs/plugins`, `tavo://docs/tools`, `tavo://docs/tool-calling`, `tavo://docs/write-safety`, `tavo://runtime`
-- 1.0 current gate 只调用 `tavo_status` 并读取 runtime/docs/schema；行为提升来自单独的 Agent Loop/MCP 矩阵，不能被 gate 代证。
-- retained 0.91 read-only/effect evidence：lorebook search/get、message find、input get、plugin runtime contributions 与 `artifacts/tavo-validation/20260710-203300-semantic-model-kpi-v23/`；本页只提升其逐 case、逐版本实际执行并 readback 的原子行为。
-
-### Existing Device And Registry Evidence
-
-- directly present AR screenshot/UI/package evidence: `artifacts/tavo-validation/20260710-203300-semantic-model-kpi-v23/model-calls/tavojs-variable/01-attempt-1/ui-after-action/`
-- directly present earlier visual baseline: `artifacts/tavo-validation/20260710-084738-semantic-model-kpi-v2/`
-- terminal semantic epoch: `artifacts/tavo-validation/20260710-203300-semantic-model-kpi-v23/`
-- cross-feature mixed coverage index: `artifacts/tavo-validation/20260711-cross-feature-aggregate-v1/`
-- project verdict registry: `assets/evidence/registry.json`
-- related interpretation rules: `references/00-source-of-truth.md`, `references/14-evidence-registry.md`, `references/19-debugging-pitfalls.md`
-
-Registry rows whose listed artifact directory is absent from the current working tree remain useful version-scoped project records, but they cannot visually or byte-for-byte prove anything beyond their exact recorded claim. Present artifacts, current runtime reads and fresh official docs take precedence when narrowing a boundary.
-
-Project-specific external MCP client/plugin implementations are intentionally outside this Tavo Skill. This page covers only Tavo's native MCP boundary and the separation between MCP, TPG, TavoJS, EJS, and Advanced Rendering.
+项目专用的外部 MCP 客户端与插件实现不属于本页范围。本页只描述 Tavo 原生边界，以及 MCP、TPG、TavoJS、EJS、宏、Agent Loop 与 Advanced Rendering 之间不可互相替代的职责。

@@ -1,16 +1,31 @@
 # Advanced Rendering, TavoJS, And Plugin Patterns
 
-This file records implementation patterns for UI-like behavior in Tavo. Treat each pattern as evidence-bounded: official prose and old skill examples are not enough for final product claims.
+This reference contains implementation patterns for UI-like behavior in Tavo. Treat each pattern as version-bounded and validate the exact host, mount point, selector, API, and visual target used by the user's artifact.
 
-Current declaration snapshot: `assets/official-docs/text-20260726/` and the Tavo `1.0.0` gate in `assets/evidence/1.0.0/20260807-gate.json`. The 1.0 overlay live-verified one localized native plugin input action and the Agent Loop settings/tool surface. It did not rerun the 13-case Advanced Rendering/TavoJS visual backlog, so retained AR panel proofs stay 0.91 and detailed Hook/TTS effects stay versioned 0.92 unless explicitly promoted.
+## Applicable Versions
+
+- Tavo 1.0 supports a localized spec-2 plugin input action and the current Agent Loop/tool surface.
+- Detailed plugin entry, configuration, input-hook, generation-hook, and TTS behavior remains version-bounded to Tavo 0.92 unless rechecked on a newer version.
+- Advanced Rendering message panels, delegated clicks, chat-scope `tavo.set/get`, and `tavo.input.set/append` patterns are established on Tavo 0.91 but should be rechecked after WebView or renderer changes.
+- No current capability supports a persistent app-level floating control outside Tavo's chat WebView.
 
 ## Rendering Model
 
-Tavo Advanced Rendering should be treated as HTML/CSS/JS rendered inside an app-controlled WebView/chat surface, not as a normal browser page. Browser APIs, inline event handlers, CSS positioning, sanitization, script lifecycle, storage, and app bridges must be verified in Tavo itself.
+Treat Advanced Rendering as HTML/CSS/JS rendered inside an app-controlled WebView or chat surface, not as a normal browser page. Browser APIs, inline handlers, CSS positioning, clipping, sanitization, script lifecycle, storage, and app bridges can differ from desktop Chrome.
+
+Keep rendering concerns separate:
+
+- HTML/CSS source validity;
+- DOM mount and event execution;
+- native input or data side effects;
+- visible mobile layout;
+- persistence after reload, chat switch, or app restart.
+
+Passing one layer does not prove the others.
 
 ## Safer Interactive Button Pattern
 
-Preferred shape for clickable rendered controls:
+Prefer delegated listeners and `data-*` attributes over inline `onclick`:
 
 ```html
 <div class="tavo-card-actions" data-tavo-widget="example">
@@ -19,12 +34,13 @@ Preferred shape for clickable rendered controls:
 </div>
 <script>
 (() => {
-  const root = document.currentScript.closest('[data-tavo-widget="example"]') || document;
+  const script = document.currentScript;
+  const root = script?.closest('[data-tavo-widget="example"]') || document;
   root.addEventListener('click', async (event) => {
     const button = event.target.closest('[data-action="append"]');
     if (!button) return;
     const text = button.getAttribute('data-text') || '';
-    if (window.tavo && window.tavo.input && typeof window.tavo.input.append === 'function') {
+    if (window.tavo?.input?.append) {
       await window.tavo.input.append(text);
     }
   });
@@ -32,93 +48,103 @@ Preferred shape for clickable rendered controls:
 </script>
 ```
 
-Evidence boundary: the delegated `data-*` pattern plus `tavo.input.set/append` and chat-scope `tavo.set/get` is live-verified on Tavo 0.91 in the v23 rendered message panel. The exact snippet above is still a template, so validate changed mount points, selectors, and API calls rather than treating one successful panel as universal browser compatibility.
+For repeated message widgets, scope selectors to the current widget and avoid global IDs. Make actions idempotent or disable the button while an asynchronous write is in flight.
 
-## Floating Or Overlay UI
+## Floating And Overlay Targets
 
-For "floating button in a dialogue box" questions, distinguish four targets:
+Distinguish four different requests:
 
-- inside one rendered message bubble;
-- visually overlaying the chat viewport;
-- plugin-provided chat action in the native input `+` menu;
-- persistent app-level floating action outside Tavo's chat WebView.
+| Target | Recommended route | Boundary |
+| --- | --- | --- |
+| Floating inside one rendered message | Advanced Rendering with a bounded relative container and an absolute child | Can be clipped by the message container. |
+| Overlaying the chat viewport | Advanced Rendering experiment | WebView and message clipping can prevent a true viewport overlay. |
+| Native action in the input `+` menu | TPG `inputActions` | Requires an installed plugin and Advanced Rendering for handler execution. |
+| Persistent app-level floating action | Not currently exposed | Do not promise this without a new app/plugin API. |
 
-Likely routes:
+For a floating layout, verify narrow width, long content, scrolling, keyboard open/close, chat switching, safe-area insets, and overlap with native controls.
 
-- message-bubble floating: Advanced Rendering with CSS `position:absolute` inside a bounded container;
-- viewport overlay: Advanced Rendering may be constrained by WebView/message clipping, needs screenshot proof;
-- native input `+` menu action: a localized minimal spec-2 action is live-verified on Tavo 1.0 for writing an exact input marker; older multi-action set/append coverage remains versioned 0.91;
-- app-level persistent floating control: no current evidence; answer as unsupported or unverified unless a future Tavo plugin API exposes it.
+## TavoJS Host Boundary
 
-Minimum proof:
+Use `window.tavo` in ordinary rendered-message TavoJS. Avoid internal bridges such as `window.tav`.
 
-- render marker visible in screenshot;
-- click changes input text or visible state;
-- UI remains usable after scroll/chat switch;
-- retained evidence records the test card/chat/plugin and final readback state.
+Before shipping a rendered interaction:
 
-## TavoJS Boundary
+1. reduce it to the smallest HTML/JS case;
+2. confirm the required TavoJS method exists on the target version;
+3. trigger exactly one action;
+4. read back the intended state or input value;
+5. inspect the rendered result on the target viewport;
+6. reload and switch chats if persistence is part of the requirement.
 
-Use `window.tavo` as the public scripting boundary. Do not rely on internal bridges such as `window.tav` unless current official docs or runtime docs explicitly expose them.
-
-Before claiming an API:
-
-1. Check official JavaScript API docs.
-2. Check current MCP `tavo://docs/tavojs` resource.
-3. Search deprecated claims for older wrong APIs.
-4. Run a minimal render case if behavior affects UI, input, variables, messages, or files.
-
-`tavo.tts.play/stop` and the structured `tavo.input.send()` result are now current official/MCP declarations. Generation/input lifecycle Hooks are not ordinary message TavoJS: they belong to installed plugin `entry` scripts only.
+`tavo.tts.play/stop` and structured `tavo.input.send()` results are TavoJS capabilities, but audio identity and every failure reason still require target-version checks. Generation and input lifecycle hooks are plugin-entry features; they are not ordinary message-script APIs.
 
 ## Plugin Package Boundary
 
-Plugin proof must be staged:
+For new packages:
 
-1. validate manifest and package shape locally;
-2. validate through MCP tool if exposed;
-3. import/install a disposable package;
-4. verify action/UI/setting registration;
-5. trigger the action;
-6. verify persistence, final readback, and retained evidence location.
+- use `specVersion: 2`;
+- use valid SemVer;
+- set `localization.defaultLocale`;
+- place `manifest.json` at package root;
+- use root `entry.js` through `entry: "entry.js"` when plugin-level JavaScript runs;
+- keep `scripts.actions` only for legacy compatibility;
+- allow hook-only plugins to use `entry` without UI contributions;
+- allow fragment/settings-only packages to omit `entry` when no plugin-level JavaScript runs.
 
-Never treat "zip was created" or "manifest parsed" as plugin success.
-
-For new packages, use `specVersion: 2`, valid SemVer, required `localization.defaultLocale`, root `manifest.json`, and `entry: "entry.js"` when actions or plugin-level JavaScript run. Keep `scripts.actions` only as a v1 legacy fixture. A hook-only plugin may have `entry` without UI contributions; a fragment/settings-only package can omit it when no plugin-level JavaScript runs.
-
-Plugin entry/actions/fragments should use the unqualified lexical `tavo` binding:
+Plugin entry scripts, action handlers, and fragments use the unqualified lexical `tavo` binding:
 
 ```js
 tavo.plugin.on('chat:opened', async (event) => {
-  const enabled = tavo.plugin.config.get('enabled')
-  if (enabled) await tavo.utils.toast(`chat=${event.chatId}`)
-})
+  const enabled = tavo.plugin.config.get('enabled');
+  if (enabled) await tavo.utils.toast(`chat=${event.chatId}`);
+});
 ```
 
-Do not rewrite this as `window.tavo`/`globalThis.tavo` for plugin scope. In contrast, ordinary rendered message TavoJS is a separate host; success in one host cannot substitute for the other.
+Do not rewrite plugin-scope code as `window.tavo` or `globalThis.tavo`. Plugin scope and rendered-message scope are different hosts; success in one does not prove the other.
 
-## 0.92 Hook And TTS Pattern Boundary
+## Hook And TTS Boundaries
 
-- Chat/message notifications observe persistent state and cannot cancel chat/generation.
-- `input:beforeSend` can rewrite/cancel UI, TavoJS, and MCP sends; `input:afterSend` only means accepted input.
-- Generation prepare/success are serial fail-open interceptors; error/cancelled are terminal notifications; HTML fragments cannot register them.
-- Plugin TTS must explicitly resolve one character/persona speaker and uses the shared current-chat queue.
-- The 0.92 matrix promotes only bounded pieces: persistent-message ordering and handler isolation; three-source input rewrite/cancel/fail-open; generation prepare/success/terminal semantics; and configured character TTS integration. The chat alias, one generation source, persona TTS, and audible behavior remain mixed/blocked/manual.
+For Tavo 0.92-style plugin entries:
 
-## Pattern Status Table
+- chat/message notifications observe state and cannot cancel a chat or generation;
+- `input:beforeSend` can rewrite or cancel supported sends;
+- `input:afterSend` means the input was accepted, not that generation completed;
+- handler errors, timeouts, or invalid rewrites should fail open unless an explicit cancel is returned;
+- generation prepare/success handlers can transform transient request or response data;
+- generation error/cancelled are terminal notifications;
+- HTML fragments cannot register generation hooks;
+- TTS must resolve an explicit character or persona speaker and uses the shared current-chat queue;
+- audible voice identity must be checked by listening, not inferred from a successful call.
 
-| Pattern | Status | Proof path |
+Generation-source coverage, persona TTS, busy-state behavior, and every notification alias remain version- and path-dependent.
+
+## Pattern Boundaries
+
+| Pattern | Usable scope | Remaining boundary |
 | --- | --- | --- |
-| Plugin input `+` action | exact localized marker action `live-verified` on 1.0; broader set/append matrix remains 0.91 | `assets/evidence/1.0.0/20260807-agent-loop-mcp-live-matrix.json`; older proof in `artifacts/tavo-validation/20260710-plugin-ui-action/` |
-| Delegated `data-*` AR click handler plus `tavo.input.set/append` | `ui-pass` on 0.91; not rerun by the 1.0 overlay | `artifacts/tavo-validation/20260710-203300-semantic-model-kpi-v23/model-calls/tavojs-variable/` |
-| Scoped responsive CSS panel with mobile one-column media query | `ui-pass` on 0.91; not rerun by the 1.0 overlay | v23 per-case before/after screenshot, UI XML, and panel source |
-| Spec 2 manifest, localized native action, and root entry | bounded `live-verified` on 1.0 | `assets/evidence/1.0.0/20260807-agent-loop-mcp-live-matrix.json`; locale-change/fragment rerender remains incomplete |
-| Root `entry.js`, legacy alias, and dual-entry precedence | `live-verified` on 0.92 | F01-F03 in `20260717-live-matrix.json` |
-| Entry without UI contributions and plugin config reads | `live-verified` on 0.92 | F01/F04; notification reliability is separately mixed in F05 |
-| Input lifecycle Hooks | `live-verified` on 0.92 within three-source/fault boundary | F06 |
-| Generation lifecycle Hooks | `mixed` on 0.92 | F07/F08 pass atomically; F09 source matrix mixed |
-| Plugin `tavo.tts.play/stop` | `mixed` on 0.92 | Configured character/queue integration passed; persona and audible semantics remain unproved |
-| CSS floating inside a rendered message | `probable` | Needs `css-webview-layout` and `floating-button` cases |
-| Plugin HTML fragment panel in chat WebView | `ui-tree-pass, visual-partial` | Fragment text seen in WebView UI tree; native plugin action screenshot does not prove fragment-button click or floating layout |
-| App-level persistent floating control outside chat WebView | `unverified` | No current official/runtime evidence |
-| Direct inline `onclick` | `unreliable-historical` | Use only if current test proves it |
-| Internal `window.tav` calls | `deprecated-risk` | Avoid unless current docs/runtime expose it |
+| Native plugin input action | Tavo 1.0 minimal localized action | Does not prove sidebar, fragment button, or arbitrary action sets. |
+| Delegated AR click with input set/append | Tavo 0.91 message panels | Recheck selectors, mounts, and renderer settings. |
+| Responsive HTML/CSS panel | Tavo 0.91 message panel | Recheck screen sizes, clipping, sticky/fixed behavior, and sanitation. |
+| Spec-2 manifest and root entry | Tavo 1.0 minimal plugin | Locale change and fragment rerender are separate cases. |
+| Root entry, legacy alias, entry precedence | Tavo 0.92 | Do not infer all later versions without a compatibility check. |
+| Input lifecycle hooks | Tavo 0.92 tested paths | Attachments and every send source are not guaranteed. |
+| Generation lifecycle hooks | Tavo 0.92 partial | Some generation sources remain path-dependent. |
+| Plugin TTS | Tavo 0.92 partial | Persona selection and audible output require manual validation. |
+| HTML fragment registration | Supported plugin pattern | Registration does not prove pixel layout or button execution. |
+| App-level persistent floating control | Unsupported/unexposed | Requires a future native or plugin API. |
+| Inline `onclick` | Compatibility risk | Prefer delegated listeners. |
+| Internal `window.tav` | Unsupported contract | Use only documented public bindings. |
+
+## User-Facing Validation
+
+A community artifact should include a small validation card or disposable plugin that proves only its own behavior:
+
+1. show an unmistakable render marker;
+2. click one control and change a visible state marker;
+3. set or append a unique input string;
+4. read the input back before sending;
+5. verify the layout after scroll, keyboard open/close, and chat switch;
+6. separately test any persistence or audio requirement;
+7. remove or disable the disposable artifact after validation.
+
+A visible panel does not prove its button executed. A changed composer does not prove a message was sent. A registered plugin contribution does not prove its UI mounted. A screenshot proves visible pixels at that moment, not stored data or future compatibility.

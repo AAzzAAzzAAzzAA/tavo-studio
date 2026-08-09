@@ -1,6 +1,6 @@
 {
-  "id": "codex.validation.legacy",
-  "name": "Codex Legacy Entry Fixture",
+  "id": "community.validation.legacy",
+  "name": "Community Legacy Entry Fixture",
   "version": "0.91.0",
   "scripts": {
     "actions": "legacy-actions.js"

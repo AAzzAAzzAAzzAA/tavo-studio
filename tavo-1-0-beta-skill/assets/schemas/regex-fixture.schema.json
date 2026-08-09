@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://codex.local/tavo/schemas/regex-fixture.schema.json",
+  "$id": "https://example.invalid/tavo-skill/schemas/regex-fixture.schema.json",
   "title": "Regex Fixture Suite",
   "type": "object",
   "required": ["name", "rules", "cases"],

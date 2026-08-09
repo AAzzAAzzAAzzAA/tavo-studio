@@ -1,9 +1,9 @@
 {
-  "id": "codex.validation.fixture",
-  "name": "Codex Validation Fixture Plugin",
+  "id": "community.validation.fixture",
+  "name": "Community Validation Fixture Plugin",
   "version": "0.1.0",
   "specVersion": 1,
-  "author": "Codex",
+  "author": "Community",
   "description": "Fixture plugin manifest for local validation only.",
   "permissions": ["input"],
   "entry": "entry.js",
@@ -11,7 +11,7 @@
     "inputActions": [
       {
         "id": "fixture-ping",
-        "label": "Codex Fixture Ping"
+        "label": "Community Fixture Ping"
       }
     ],
     "htmlFragments": [

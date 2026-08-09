@@ -1636,7 +1636,7 @@ class VirtualProviderHandler(BaseHTTPRequestHandler):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bind", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=18793)
+    parser.add_argument("--port", type=int, default=0, help="Listen port; 0 selects an ephemeral port.")
     parser.add_argument("--model", default="tavo-virtual")
     parser.add_argument("--capture-dir", type=Path, required=True)
     parser.add_argument("--client-key-file", type=Path, required=True)

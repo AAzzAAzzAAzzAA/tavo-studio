@@ -4,7 +4,7 @@ Use this file when a Tavo artifact "imports" but does not behave, or when a capa
 
 ## Import Is Not Preservation
 
-An import dry-run can prove that Tavo accepts an object shape, but it does not prove every field survives. The 2026-07-09 lorebook smoke showed entry normalization after actual import. Use readback/export comparison for preservation claims.
+An import dry-run can prove that Tavo accepts an object shape, but it does not prove every field survives. Worldbook entries may be normalized during import. Use readback/export comparison for preservation claims.
 
 ## Source Text Is Not Render Proof
 
@@ -12,25 +12,25 @@ For Advanced Rendering, seeing HTML/CSS/JS source text in a chat is not success.
 
 ## Direct MCP Tool Method Calls Are Wrong
 
-Tavo tools are invoked through JSON-RPC method `tools/call`. Direct JSON-RPC methods named after the tool returned method-not-found behavior in the smoke test.
+Tavo tools are invoked through JSON-RPC method `tools/call`. Direct JSON-RPC methods named after the tool are not the supported call path.
 
 ## Screen State Can Break MCP
 
-Phone sleep, network state, endpoint changes, token changes, and app reinstall can make old MCP assumptions invalid. Re-probe every run.
+Phone sleep, network state, endpoint changes, token changes, and app reinstall can invalidate an MCP session. Recheck connectivity before relying on it.
 
 ## Repeated `chat.current` And `input.get` Calls Can Accumulate File Descriptors
 
-`live-verified-regression` on Android with Tavo `0.91.0`: background polling of `tavo.chat.current()` and `tavo.input.get()` was associated with reproducible file-descriptor growth and eventually a spinning or unresponsive plugin UI.
+On Tavo `0.91.0`, background polling of `tavo.chat.current()` and `tavo.input.get()` could accumulate file descriptors and eventually leave plugin UI spinning or unresponsive.
 
 - Do not poll these APIs on timers. Read them at explicit user actions or the smallest number of irreversible state boundaries.
-- Do not generalize the regression to every TavoJS API. The strongest direct A/B evidence is for `chat.current()` and `input.get()`; other returned operations require isolated tests before being named individually.
+- Do not generalize the regression to every TavoJS API. The known boundary covers `chat.current()` and `input.get()`; treat other operations separately.
 - When a plugin spins or stops responding, inspect the unchanged Tavo PID and native resource state before blaming network or external services.
 - Distinguish `/proc/<pid>/status` `FDSize` from actual open descriptors. `FDSize` is the descriptor-table capacity; use `/proc/<pid>/fd` or a platform log's held-FD count for the current open count.
-- Re-run the same-PID resource gate in `references/15-phone-validation-runbook.md` after a Tavo, Android WebView, plugin-host, or bridge change.
+- Recheck the same process's resource usage after a Tavo, Android WebView, plugin-host, or bridge change.
 
 ## Expected Revision Can Be Too Strict
 
-`tavo_chat_update` with `expectedRevision` returned a stale error in smoke while update without it worked. For smoke tests, prefer dryRun -> actual without expected revision -> readback -> restore, unless the exact test is about revision safety.
+`tavo_chat_update` may reject an `expectedRevision` as stale while an update without it succeeds. For disposable checks, prefer dryRun -> actual without expected revision -> readback -> restore, unless the task specifically tests revision safety.
 
 ## UI Tree Proves Structure, Not Styling
 
@@ -38,11 +38,11 @@ UIAutomator can locate title, input, focus, messages, and controls, but it canno
 
 ## Accessibility Is Not Guaranteed
 
-The current phone did not have accessibility service enabled. Use UI-tree bounds plus ADB tap as the default fallback. Record accessibility as blocked rather than spending time on it during unrelated validation.
+Accessibility may be unavailable. Use UI-tree bounds plus an explicit tap fallback when authorized, and keep the limitation separate from the feature under test.
 
 ## Old Skill Claims Can Be Dangerous
 
-Known risky old claims include hard TavoJS APIs, internal bridges, read-only/write-only assumptions, and old lint rules. Check `references/historical/deprecated-claims.md` before reusing old snippets.
+Risky old claims include hard-coded TavoJS APIs, internal bridges, read-only/write-only assumptions, and obsolete lint rules. Check the current feature reference and scan old code before reuse.
 
 ## Provider Settings Are Sensitive
 
@@ -50,7 +50,7 @@ Voice, image, API, model, and provider settings can leak keys. Do not store real
 
 ## Fake Media Gateways Prove Integration, Not Quality
 
-On Tavo 0.93, the zero-upstream virtual provider proved bounded generation, multipart ASR, TTS, and fixed-image request/response paths without any real credential or model call. Do not promote those results into model semantics, human recognition accuracy, speaker identity, audible queue cancellation, image fidelity, or real-provider compatibility. Keep those proof axes separate and report `countsTowardKpi=false`.
+A deterministic provider can exercise bounded generation, multipart ASR, TTS, and fixed-image request/response paths. It does not prove model semantics, human recognition accuracy, speaker identity, audible queue cancellation, image fidelity, or real-provider compatibility.
 
 ## Local Binding Must Be Proven Before Send
 
@@ -58,15 +58,15 @@ A local provider process existing on the Mac does not prove Tavo will use it. Be
 
 ## Long-Press Duration Is Not A Stable Threshold
 
-The 0.93 automated ASR run completed a normal hold path, but one nominally short hold still emitted a request. Record down/hold/release timing and the postcondition for every gesture. Do not publish one device/build timing as a universal cancel threshold.
+On Tavo `0.93`, a nominally short hold could still emit an ASR request. Record down/hold/release timing and the postcondition for every gesture. Do not treat one device/build timing as a universal cancel threshold.
 
 ## Retain Versus Unset Can Conflict
 
-The 0.93 image-provider UI exposed edit/copy/delete but no unset action for the sole retained config. If the user requires the test config to remain, deletion is not a valid way to make it inactive. Restore the primary chat API and other state, then record the narrow retained-provider limitation.
+On Tavo `0.93`, an image-provider configuration could expose edit/copy/delete without a separate unset action. If a configuration must remain, deletion is not a valid way to make it inactive. Restore the primary chat API and other state, then report the narrow retained-provider limitation.
 
 ## Plugin Runtime Reload Can Distort Event Audits
 
-The 0.92 notification matrix observed runtime reload plus catch-up `chat:opened` while a controlled `chat:changed` alias path still missed `chat:updated`. Timestamp and group rows by runtime generation; do not use a reload marker to fill in an event that was never delivered. Treat each generation source independently: terminal semantics can pass even when one declared source path regresses.
+On Tavo `0.92`, runtime reload could produce catch-up `chat:opened` behavior while a `chat:changed` alias path still missed `chat:updated`. Group observations by runtime generation; do not use a reload marker to fill in an event that was never delivered.
 
 ## Cleanup Is Part Of The Test
 

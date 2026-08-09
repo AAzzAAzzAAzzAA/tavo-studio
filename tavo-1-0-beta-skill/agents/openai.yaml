@@ -1,6 +1,4 @@
 interface:
-  display_name: "Tavo 1.0 Beta"
-  short_description: "Test Tavo 1.0 Agent Loop and MCP workflows"
-  default_prompt: "Use $tavo-1-0-beta-skill to answer from versioned Tavo 1.0 evidence or create and validate a beta-compatible Tavo artifact."
-policy:
-  allow_implicit_invocation: false
+  display_name: "Tavo Skill"
+  short_description: "Create, inspect, simulate, and validate Tavo artifacts"
+  default_prompt: "Use $tavo-skill to answer with packaged capability results, create or revise only the commissioned Tavo artifacts, or compile and test a text-only Tavo-shaped model request."

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 import threading
 import unittest
@@ -10,6 +11,10 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
 import tavo_request_capture_gateway as gateway
 
@@ -172,7 +177,7 @@ class GatewayTest(unittest.TestCase):
             "messages": [{"role": "system", "content": "EJS marker"}, {"role": "user", "content": "hello"}],
             "api_key": "body-secret",
             "refresh_token": "refresh-secret",
-            "note": "embedded sk-1234567890abcdefghijklmnop",
+            "note": "embedded sk-EXAMPLE_PLACEHOLDER_000000",
             "stream": False,
         }
         with self.request("/v1/chat/completions", payload) as response:
@@ -184,7 +189,7 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual(capture["request"]["body"]["messages"][0]["content"], "EJS marker")
         self.assertEqual(capture["request"]["body"]["api_key"], "<redacted>")
         self.assertEqual(capture["request"]["body"]["refresh_token"], "<redacted>")
-        self.assertNotIn("sk-1234567890abcdefghijklmnop", json.dumps(capture))
+        self.assertNotIn("sk-EXAMPLE_PLACEHOLDER_000000", json.dumps(capture))
         self.assertEqual(capture["request"]["headers"]["Authorization"], "<redacted>")
         serialized = json.dumps(capture)
         self.assertNotIn(UPSTREAM_KEY, serialized)

@@ -1,9 +1,9 @@
-<div data-codex-plugin-marker-panel="true">
+<div data-community-plugin-marker-panel="true">
   <strong data-i18n="title"></strong>
   <span data-i18n="status"></span>
   <script>
     (() => {
-      const root = document.currentScript.closest('[data-codex-plugin-marker-panel="true"]');
+      const root = document.currentScript.closest('[data-community-plugin-marker-panel="true"]');
       if (!root) return;
       const render = () => {
         root.querySelector('[data-i18n="title"]').textContent = tavo.plugin.i18n.t("runtime.panel.title");

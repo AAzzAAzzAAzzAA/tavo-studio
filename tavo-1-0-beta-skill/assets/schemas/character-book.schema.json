@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://codex.local/tavo/schemas/character-book.schema.json",
+  "$id": "https://example.invalid/tavo-skill/schemas/character-book.schema.json",
   "title": "Portable Character Book",
   "type": "object",
   "properties": {

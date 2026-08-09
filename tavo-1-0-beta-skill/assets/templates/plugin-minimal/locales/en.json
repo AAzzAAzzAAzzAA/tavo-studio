@@ -1,5 +1,5 @@
 {
-  "plugin.name": "Codex Validation Minimal",
+  "plugin.name": "Community Validation Minimal",
   "plugin.description": "Minimal disposable plugin package for Tavo validation.",
   "actions.insertMarker": "Insert Marker",
   "settings.enabled": "Enabled",
@@ -7,7 +7,7 @@
   "settings.mode.brief": "Brief",
   "settings.template.label": "Template",
   "settings.template.default": "Remember:",
-  "runtime.marker": "Codex plugin marker",
-  "runtime.panel.title": "Codex plugin marker panel",
+  "runtime.marker": "Community plugin marker",
+  "runtime.panel.title": "Community plugin marker panel",
   "runtime.panel.status": "Ready"
 }
