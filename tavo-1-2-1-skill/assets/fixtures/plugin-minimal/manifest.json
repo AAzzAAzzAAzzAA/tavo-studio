@@ -1,0 +1,25 @@
+{
+  "id": "community.validation.fixture",
+  "name": "Community Validation Fixture Plugin",
+  "version": "0.1.0",
+  "specVersion": 1,
+  "author": "Community",
+  "description": "Fixture plugin manifest for local validation only.",
+  "permissions": ["input"],
+  "entry": "entry.js",
+  "contributes": {
+    "inputActions": [
+      {
+        "id": "fixture-ping",
+        "label": "Community Fixture Ping"
+      }
+    ],
+    "htmlFragments": [
+      {
+        "id": "fixture-panel",
+        "src": "ui/panel.html",
+        "mount": "/chat/body/end"
+      }
+    ]
+  }
+}
