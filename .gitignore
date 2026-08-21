@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 tavo-skill/artifacts/
 tavo-1-0-beta-skill/artifacts/
+tavo-1-2-1-skill/artifacts/
 archive/**/artifacts/
 archive/**/node_modules/
 .DS_Store

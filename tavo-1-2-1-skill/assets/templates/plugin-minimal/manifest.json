@@ -1,0 +1,78 @@
+{
+  "id": "community.validation.minimal",
+  "name": {
+    "$t": "plugin.name"
+  },
+  "version": "0.1.0",
+  "specVersion": 2,
+  "minAppVersion": "0.93.0",
+  "author": "Community",
+  "description": {
+    "$t": "plugin.description"
+  },
+  "localization": {
+    "defaultLocale": "en",
+    "resources": {
+      "en": "locales/en.json",
+      "zh-CN": "locales/zh-CN.json"
+    }
+  },
+  "permissions": ["input"],
+  "entry": "entry.js",
+  "contributes": {
+    "inputActions": [
+      {
+        "id": "insert-marker",
+        "label": {
+          "$t": "actions.insertMarker"
+        }
+      }
+    ],
+    "htmlFragments": [
+      {
+        "id": "marker-panel",
+        "src": "ui/panel.html",
+        "mount": "/chat/body/end"
+      }
+    ],
+    "settings": {
+      "schema": [
+        {
+          "key": "enabled",
+          "type": "switch",
+          "label": {
+            "$t": "settings.enabled"
+          },
+          "default": true
+        },
+        {
+          "key": "mode",
+          "type": "select",
+          "label": {
+            "$t": "settings.mode.label"
+          },
+          "default": "brief",
+          "options": [
+            {
+              "value": "brief",
+              "label": {
+                "$t": "settings.mode.brief"
+              }
+            },
+            "Detailed"
+          ]
+        },
+        {
+          "key": "template",
+          "type": "textarea",
+          "label": {
+            "$t": "settings.template.label"
+          },
+          "default": {
+            "$t": "settings.template.default"
+          }
+        }
+      ]
+    }
+  }
+}

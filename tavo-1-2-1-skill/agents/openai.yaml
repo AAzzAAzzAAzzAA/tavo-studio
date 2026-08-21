@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tavo Skill 1.2.1"
+  short_description: "Use packaged Tavo 1.2.1 facts and authoring tools"
+  default_prompt: "Use $tavo-skill to apply the packaged Tavo 1.2.1 facts, create or revise only the commissioned Tavo artifacts, or compile and test a text-only Tavo-shaped model request."

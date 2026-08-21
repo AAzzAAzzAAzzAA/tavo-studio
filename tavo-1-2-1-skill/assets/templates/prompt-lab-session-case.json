@@ -1,0 +1,166 @@
+{
+  "schemaVersion": "2.3",
+  "preset": {
+    "name": "Prompt Lab multi-turn preset",
+    "basicPrompts": {
+      "persona": "{{persona}}",
+      "description": "{{description}}",
+      "personality": "{{personality}}",
+      "scenario": "{{scenario}}",
+      "exampleMessageStart": "[Example dialogue]",
+      "chatStart": "[Start of current chat]",
+      "lorebook": "{0}"
+    },
+    "entries": [
+      {
+        "identifier": "session-main",
+        "name": "Session main",
+        "content": "<% incvar(\"prompt_lab.turn\") %>[PROMPT_LAB_TURN]=<%- getvar(\"prompt_lab.turn\") %>\nWrite the next reply as {{char}} and preserve continuity with the visible conversation history.",
+        "role": "system",
+        "type": "custom",
+        "injectionPosition": "relative",
+        "injectionDepth": 0,
+        "forbidOverrides": true,
+        "enabled": true,
+        "active": true
+      },
+      {
+        "identifier": "personaDescription",
+        "name": "Persona Description",
+        "content": "",
+        "role": "system",
+        "type": "marker",
+        "injectionPosition": "relative",
+        "injectionDepth": 4,
+        "enabled": true,
+        "active": true
+      },
+      {
+        "identifier": "charDescription",
+        "name": "Character Description",
+        "content": "",
+        "role": "system",
+        "type": "marker",
+        "injectionPosition": "relative",
+        "injectionDepth": 4,
+        "enabled": true,
+        "active": true
+      },
+      {
+        "identifier": "scenario",
+        "name": "Scenario",
+        "content": "",
+        "role": "system",
+        "type": "marker",
+        "injectionPosition": "relative",
+        "injectionDepth": 4,
+        "enabled": true,
+        "active": true
+      },
+      {
+        "identifier": "worldInfoAfter",
+        "name": "Lorebook After",
+        "content": "",
+        "role": "system",
+        "type": "marker",
+        "injectionPosition": "relative",
+        "injectionDepth": 4,
+        "enabled": true,
+        "active": true
+      },
+      {
+        "identifier": "chatHistory",
+        "name": "Chat History",
+        "content": "",
+        "role": "system",
+        "type": "marker",
+        "injectionPosition": "relative",
+        "injectionDepth": 4,
+        "enabled": true,
+        "active": true
+      }
+    ]
+  },
+  "character": {
+    "spec": "chara_card_v2",
+    "spec_version": "2.0",
+    "data": {
+      "name": "Session Guide",
+      "description": "<% incvar(\"prompt_lab.card_turn\") %>[CARD_TURN]=<%- getvar(\"prompt_lab.card_turn\") %>\n{{char}} is a concise continuity tester.",
+      "personality": "Observant and consistent.",
+      "scenario": "[LAST_USER_CURRENT]=<%- lastUserMessage.includes(\"SESSION_TURN\") ? \"YES\" : \"NO\" %>\n[LAST_ASSISTANT_PRESENT]=<%- lastCharMessage.length > 0 ? \"YES\" : \"NO\" %>",
+      "first_mes": "The multi-turn test is ready.",
+      "alternate_greetings": [],
+      "mes_example": ""
+    }
+  },
+  "persona": {
+    "name": "User",
+    "description": "A tester checking prompt continuity across multiple model requests."
+  },
+  "worldbooks": [
+    {
+      "name": "Session keyword window",
+      "entries": [
+        {
+          "identifier": "session-keyword",
+          "name": "Session keyword",
+          "content": "[SESSION_KEYWORD_VISIBLE]=YES",
+          "enabled": true,
+          "strategy": "keyword",
+          "keywords": ["session-keyword"],
+          "secondaryKeywords": [],
+          "secondaryKeywordStrategy": "none",
+          "scanDepth": 2,
+          "caseSensitive": false,
+          "matchWholeWord": false,
+          "injectionPosition": "lorebookAfter",
+          "injectionDepth": 4,
+          "injectionRole": "system",
+          "probability": 100,
+          "sticky": 0,
+          "cooldown": 0,
+          "delay": 0
+        }
+      ]
+    }
+  ],
+  "history": [],
+  "greeting": "first",
+  "turns": [
+    {
+      "label": "keyword trigger",
+      "userInput": "SESSION_TURN_1 session-keyword: begin the test.",
+      "assistantResponse": "Offline compile placeholder for the first assistant reply."
+    },
+    {
+      "label": "history carry",
+      "userInput": "SESSION_TURN_2: continue from the previous reply.",
+      "assistantResponse": "Offline compile placeholder for the second assistant reply."
+    },
+    {
+      "label": "keyword expiry",
+      "userInput": "SESSION_TURN_3: finish the continuity check."
+    }
+  ],
+  "seed": 0,
+  "sessionBudgetBytes": 67108864,
+  "ejs": {
+    "mode": "sandboxed",
+    "timeoutMs": 500,
+    "characterId": "session-guide",
+    "variables": {
+      "chat": {},
+      "global": {}
+    }
+  },
+  "macroValues": {},
+  "model": {
+    "id": "replace-with-model-id",
+    "baseUrl": "https://replace-with-provider.example/v1",
+    "parameters": {
+      "temperature": 0.2,
+      "max_tokens": 400
+    }
+  }
+}

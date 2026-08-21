@@ -1,0 +1,6 @@
+{
+  "id": "community.validation.nested",
+  "name": "Community Single Wrapper Fixture",
+  "version": "0.92.0",
+  "entry": "entry.js"
+}
